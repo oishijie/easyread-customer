@@ -1,0 +1,29 @@
+{
+  "name": "easyread-sync",
+  "version": "1.0.0",
+  "description": "EasyRead Sync Backend on Cloudflare Workers",
+  "main": "src/index.ts",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typecheck": "tsc --noEmit",
+    "db:create": "wrangler d1 create easyread-sync",
+    "db:init": "wrangler d1 execute easyread-sync --file=./schema.sql",
+    "db:init:local": "wrangler d1 execute easyread-sync --local --file=./schema.sql",
+    "r2:create": "wrangler r2 bucket create easyread-snapshots"
+  },
+  "keywords": [
+    "cloudflare",
+    "workers",
+    "easyread"
+  ],
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20241022.0",
+    "typescript": "^5.6.3",
+    "wrangler": "^3.80.0"
+  },
+  "dependencies": {
+    "hono": "^4.6.0"
+  }
+}

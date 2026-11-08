@@ -1,0 +1,739 @@
+import { normalizeNotesImport, orderNotes } from './notesModel.mjs';
+import './locale.js';
+import {
+  ALL_RECORDS_NAME,
+  ANNOTATIONS_NAME,
+  ANNOTATION_AUTHOR_NAME,
+  ARTIFACTS_NAME,
+  FAVORITE_DELETIONS_NAME,
+  HIGHLIGHTS_ENABLED_NAME,
+  KEYCHAIN_SEPARATOR,
+  NOTES_NAME,
+  READ_LATERS_NAME,
+  READ_STATUS_READED,
+  READ_STATUS_READING,
+  READ_STATUS_UNREAD,
+  SNAPSHOT_UPLOAD_NAME,
+  UPDATE_STATUS_NO,
+  UPDATE_STATUS_YES,
+  createReadLaterUpdate,
+  decodeStoredText,
+  validateStorageImport,
+  latestRecordTime,
+  normalizePageUrl
+} from "./easyReadData.mjs";
+
+export {
+  decodeStoredText,
+  ALL_RECORDS_NAME,
+  ANNOTATIONS_NAME,
+  ANNOTATION_AUTHOR_NAME,
+  ARTIFACTS_NAME,
+  FAVORITE_DELETIONS_NAME,
+  HIGHLIGHTS_ENABLED_NAME,
+  KEYCHAIN_SEPARATOR,
+  NOTES_NAME,
+  READ_LATERS_NAME,
+  READ_STATUS_READED,
+  READ_STATUS_READING,
+  READ_STATUS_UNREAD,
+  SNAPSHOT_UPLOAD_NAME,
+  UPDATE_STATUS_NO,
+  UPDATE_STATUS_YES
+};
+
+export function getKey(url) {
+  return normalizePageUrl(url);
+}
+
+export function updateStorageCallbackReadLaterAdd(queryValue, context) {
+  const result = createReadLaterUpdate(queryValue, {
+    storageKey: READ_LATERS_NAME,
+    tab: context.tab,
+    now: context.now ?? Date.now,
+    callbackOnUpdated: context.callbackOnUpdated,
+    messages: {
+      first: getMessageForLocales("popup_page_message_readlaters_firsttime"),
+      duplicate: getMessageForLocales("popup_page_message_duplicate_readlaters"),
+      added: getMessageForLocales("popup_page_message_readlaters_added")
+    }
+  });
+  context.onMessage?.(result.message);
+  return result;
+}
+
+export function hasAnchor(url) {
+  if (!url || typeof url !== 'string')
+    return false;
+  else
+    return url.includes('#');
+}
+
+// en-US
+// console.log(formatDate(1621760400000));  // export: "5/23/2021, 12:00:00 AM"
+// fr-FR
+// console.log(formatDate(1621760400000));  // export: "23/05/2021 à 00:00:00"
+export function formatDate(timestamp) {
+  const dateObj = new Date(timestamp);
+  const formattedDate = dateObj.toLocaleString((globalThis.EasyReadLocale || chrome.i18n).getUILanguage(), { hour12: false, year: 'numeric', month: '2-digit', day: '2-digit', hour: 'numeric', minute: 'numeric', second: 'numeric' });
+  return formattedDate;
+}
+
+// return: 2023-05-23
+export function formatDateAsFileName(timestamp) {
+  const dateObj = new Date(timestamp);
+  const year = dateObj.getFullYear();
+  const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+  const day = String(dateObj.getDate()).padStart(2, '0');
+  const formattedDate = `${year}-${month}-${day}`;
+  return formattedDate;
+}
+
+export function convertToValidFileName(text) {
+  if(text && typeof text === 'string') {
+    const maxLength = 255;
+
+    const invalidCharsRegex = /[<>:"/\\|?*\x00-\x1F]/g;
+    const fileName = text.replace(invalidCharsRegex, '');
+
+    const truncatedFileName = fileName.slice(0, maxLength);
+    return truncatedFileName;
+  }
+  else {
+    return '';
+  }
+}
+
+
+export function sortDateTimeList(datetimes) {
+  return datetimes.sort((a, b) => (new Date(b) - new Date(a)));
+}
+
+export function isSupportedScheme(url) {
+  try { return /^https?:$/.test(new URL(url).protocol); } catch { return false; }
+}
+
+export function isByHuman(datetimes) {
+  if (datetimes && datetimes.length > 0) {
+    const maxDatetime = new Date(latestRecordTime({ datetimes }));
+    if ((Date.now() - maxDatetime.getTime()) > 60000) {
+      return true;
+    }
+    return false;
+  }
+}
+
+export function getMessageForLocales(name, placeHolder) {
+  if (placeHolder) {
+    return (globalThis.EasyReadLocale || chrome.i18n).getMessage(name, placeHolder);
+  }
+  else {
+    return (globalThis.EasyReadLocale || chrome.i18n).getMessage(name);
+  }
+}
+
+function padZero(num, length = 2) {
+  var padded = num.toString();
+  while (padded.length < length) {
+    padded = "0" + padded;
+  }
+  return padded;
+}
+
+export function getNowDateTimeString() {
+  var currentDate = new Date();
+  var timestamp = currentDate.getFullYear().toString() +
+    padZero(currentDate.getMonth() + 1) +
+    padZero(currentDate.getDate()) +
+    padZero(currentDate.getHours()) +
+    padZero(currentDate.getMinutes()) +
+    padZero(currentDate.getSeconds()) +
+    padZero(currentDate.getMilliseconds(), 3);
+  return timestamp;
+}
+
+export function generateRandomId() {
+  return ((new Date().getTime()) + Math.random().toFixed(4)) * 10000;
+}
+
+export function exportToJsonFile(data, filename) {
+  exportToFile(data, filename, 'application/json', (data) => {
+    return JSON.stringify(data, null, 2);
+  });
+}
+
+export function exportToMarkdownFile(data, filename) {
+  exportToFile(data, filename, 'text/markdown');
+}
+
+function exportToFile(data, filename, filetype, convertDataCallback) {
+  if(data) {
+    if(convertDataCallback) {
+      data = convertDataCallback(data);
+    }
+    const blob = new Blob([data], { type: filetype });
+    const url = URL.createObjectURL(blob);
+
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    link.click();
+
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+  }
+}
+
+const _storage = chrome.storage.local;
+
+function keyChainSplit(keyChain) {
+  return keyChain.split(KEYCHAIN_SEPARATOR);
+}
+export function keyChainGenerate(keys) {
+  return keys.join(KEYCHAIN_SEPARATOR);
+}
+
+// keys: a key chain like allRecords[KEYCHAIN_SEPARATOR]datetimes
+// callback: Query the value of the keyChain;
+//      <return> callback(queryValue);
+//        if KEYCHAIN_SEPARATOR == "."
+//        queryValue: 
+//          if keyChain == "exist_key0" , queryValue:
+//                return { "exist_key0": it'sValue }
+//          if keyChain == "not_exist_key0" , queryValue:
+//                return {}
+//          if keyChain == "exist_key0.exist_key1" , queryValue:
+//                return { "exist_key1": it'sValue }
+//          if keyChain == "exist_key0.not_exist_key1" , queryValue:
+//                return {}
+//          if keyChain == "exist_key0.not_exist_key1...not_exist_keyN" , queryValue:
+//                return {}
+// - suggest: in the callback, use the queryValue[key] to check is it available.
+// - <return>: updateBlock = { status:UPDATE_STATUS_*, value:[object], message:[string][optional], callback_onUpdated }
+//          if update, status = UPDATE_STATUS_YES, the path exist_key0.not_exist_key1 will auto create.
+//          if not update, status = UPDATE_STATUS_NO
+// context: pass the params;
+export async function updateStorageJsonData(keyChain, callback, context) {
+  const keyArray = keyChainSplit(keyChain);
+  if (keyArray && keyArray.length > 0) {
+    const key0 = keyArray[0];
+
+    const result = await _storage.get([key0]);
+      // console.log("key0=" + key0);
+      // console.log(result);
+      var obj = {};
+      if (!result[key0]) {
+        obj = { [key0]: null };
+      } else {
+        obj = result;
+      }
+      function getValue(keys) {
+        var value = result;
+        for (var i = 0; i < keys.length; i++) {
+          if (!value[keys[i]]) {
+            return {};
+          }
+          value = value[keys[i]];
+        }
+        if (keys.length > 0)
+          return { [keys[keys.length - 1]]: value };
+        else
+          return value;
+      }
+      function setValue(keys, newValue) {
+        var value = obj;
+        for (var i = 0; i < keys.length - 1; i++) {
+          if (!value[keys[i]]) {
+            value[keys[i]] = {};
+          }
+          value = value[keys[i]];
+        }
+        value[keys[keys.length - 1]] = newValue;
+      }
+      let updateBlock = null;
+      if (callback) {
+        // console.log(getValue(keyArray));
+        updateBlock = callback(getValue(keyArray), context);
+      };
+      if (updateBlock && updateBlock.status === UPDATE_STATUS_YES) {
+        setValue(keyArray, updateBlock.value);
+        await _storage.set(obj);
+          // console.log("['" + key0 + "']:Updated:");
+          // console.log(obj);
+          if (updateBlock.callback_onUpdated) {
+            updateBlock.callback_onUpdated(true, obj, context);
+          }
+      } else {
+        if (updateBlock && updateBlock.callback_onUpdated) {
+          updateBlock.callback_onUpdated(false, null, context);
+        }
+      }
+  }
+}
+
+// keyChain: like allRecords[KEYCHAIN_SEPARATOR][pageUrl]
+export function removeStorageJsonData(keyChain, callback) {
+  const keyArray = keyChainSplit(keyChain);
+  if (keyArray) {
+    const key0 = keyArray[0];
+    if (keyArray.length === 1) {
+      _storage.remove(key0, () => {
+        if (callback) { callback(); }
+        console.log("Removed: key:" + key0 + " removed from the storage.");
+      });
+    } else if (keyArray.length > 1) {
+      _storage.get([key0], (result) => {
+        var obj = result;
+        function remove(keys) {
+          var value = obj;
+          for (var i = 0; i < keys.length - 1; i++) {
+            value = value?.[keys[i]];
+            if (!value) return;
+          }
+          delete value[keys[keys.length - 1]];
+        }
+        remove(keyArray);
+        _storage.set(obj, () => {
+          if (callback) { callback(); }
+          console.log("Removed: keyChain:" + keyChain);
+        });
+      });
+    }
+  } else {
+    if (callback) { callback(); }
+    console.log("Nothing to removed: keyChain:" + keyChain);
+  }
+}
+
+// keyChain: null=all; like allRecords[KEYCHAIN_SEPARATOR][pageUrl]
+// callback: Query the value of the keyChain;
+//      void callback(queryValue);
+//        if KEYCHAIN_SEPARATOR == "."
+//        queryValue: 
+//          if keyChain == "exist_key0" , queryValue:
+//                return { "exist_key0": it'sValue }
+//          if keyChain == "not_exist_key0" , queryValue:
+//                return {}
+//          if keyChain == "exist_key0.exist_key1" , queryValue:
+//                return { "exist_key1": it'sValue }
+//          if keyChain == "exist_key0.not_exist_key1" , queryValue:
+//                return {}
+//          if keyChain == "exist_key0.not_exist_key1...not_exist_keyN" , queryValue:
+//                return {}
+// - suggest: in the callback, use the queryValue[key] to check is it available.
+// context: pass the params;
+export async function getStorageJsonData(keyChain, callback, context) {
+  if (!keyChain) {
+    _storage.get(null, (result) => {
+      if (callback) { callback(result, context); }
+    });
+  } else {
+    const keyArray = keyChainSplit(keyChain);
+    if (keyArray) {
+      const key0 = keyArray[0];
+      await _storage.get([key0], (result) => {
+        if (keyArray.length === 1) {
+          if (callback) { callback(result, context); }
+        } else {
+          function getValue(keys) {
+            var value = result;
+            for (var i = 0; i < keys.length; i++) {
+              if (!value[keys[i]]) {
+                return {};
+              }
+              value = value[keys[i]];
+            }
+            if (keys.length > 0)
+              return { [keys[keys.length - 1]]: value };
+            else
+              return value;
+          }
+          if (callback) { callback(getValue(keyArray), context); }
+        }
+      });
+    }
+  }
+}
+
+export async function mergeStorageJsonData(data, callback) {
+  if (!data) {
+    console.log("mergeStorageJsonData: data is null.");
+    if(callback) {
+      callback({ "status": false });
+    }
+    return;
+  }
+  try {
+    validateStorageImport(data);
+    data = normalizeNotesImport(data);
+    var startDateTime = new Date();
+    var counterAllRecordsDuplicateItems = 0;
+    var counterAllRecordsMergeItems = 0;
+    var counterReadLatersMergeItems = 0;
+    var counterNotesDuplicateItems = 0;
+    var counterNotesMergeItems = 0;
+    var counterAnnotationsMergeItems = 0;
+    var counterArtifactsMergeItems = 0;
+
+    var newAllRecords = data[ALL_RECORDS_NAME];
+    var newReadLaters = data[READ_LATERS_NAME];
+    var newNotes = data[NOTES_NAME];
+
+    var newArtifacts = data[ARTIFACTS_NAME];
+    const result = normalizeNotesImport(await _storage.get(null));
+      // merge all records.
+      if (newAllRecords) {
+        if(!result[ALL_RECORDS_NAME]) {
+          result[ALL_RECORDS_NAME] = {};
+        }
+
+        for (let rawKey in newAllRecords) {
+          const key = getKey(rawKey);
+          let oldItem = result[ALL_RECORDS_NAME][key];
+          const newItem = newAllRecords[rawKey];
+          if (!oldItem) {
+            result[ALL_RECORDS_NAME][key] = newItem;
+            ++counterAllRecordsMergeItems;
+          }
+          else {
+            // merge items.
+            oldItem["url"] = newItem["url"];
+            oldItem["title"] = newItem["title"];
+            if (newItem.position) oldItem.position = newItem.position;
+            if ((newItem.videoProgress?.updatedAt ?? 0) > (oldItem.videoProgress?.updatedAt ?? 0)) oldItem.videoProgress = newItem.videoProgress;
+            oldItem.datetimes = oldItem.datetimes ?? [];
+            const newDateTimes = newItem["datetimes"] ?? [];
+            const length = newDateTimes.length;
+            for (let i = 0; i < length; ++i) {
+              const datetime = newDateTimes[i];
+              if (!oldItem["datetimes"].includes(datetime)) {
+                oldItem["datetimes"].push(datetime);
+              }
+            } 
+            oldItem["datetimes"].sort((a, b) => a - b);
+            result[ALL_RECORDS_NAME][key] = oldItem;
+            ++counterAllRecordsDuplicateItems;
+          }
+        }
+      }
+      // merge readLaters.
+      if (newReadLaters) {
+        if(!result[READ_LATERS_NAME]) {
+          result[READ_LATERS_NAME] = [];
+        }
+        const length = newReadLaters.length;
+        for (var i = 0; i < length; ++i) {
+          var item = newReadLaters[i];
+          const existing = result[READ_LATERS_NAME].some(old => old.key === item.key && old.createDateTime === item.createDateTime && old.status === item.status);
+          if (!existing) { result[READ_LATERS_NAME].push(item); ++counterReadLatersMergeItems; }
+        }
+      }
+      // merge notes.
+      if(newNotes) {
+        if(!result[NOTES_NAME] || Array.isArray(result[NOTES_NAME])) {
+          result[NOTES_NAME] = {};
+        }
+
+        for (let rawKey in newNotes) {
+          const key = getKey(rawKey);
+          let oldItem = result[NOTES_NAME][key];
+          const newItem = newNotes[rawKey];
+          if (!oldItem) {
+            result[NOTES_NAME][key] = newItem;
+            ++counterNotesMergeItems;
+          }
+          else {
+            // merge items.
+            oldItem["url"] = newItem["url"];
+            oldItem["title"] = newItem["title"];
+            oldItem["createDateTime"] = oldItem["createDateTime"] < newItem["createDateTime"] ? oldItem["createDateTime"] : newItem["createDateTime"];
+            const newNotes = newItem["notes"];
+            const length = newNotes.length;
+            for (let i = 0; i < length; ++i) {
+              const newNote = newNotes[i];
+              let oldNoteFound = oldItem["notes"].find((n) => String(n.id) === String(newNote.id))
+              if (oldNoteFound) {
+                if ((oldNoteFound.updatedAt ?? oldNoteFound.createDateTime ?? 0) < (newNote.updatedAt ?? newNote.createDateTime ?? 0)) {
+                  Object.assign(oldNoteFound, newNote);
+                }
+              }
+              else {
+                oldItem["notes"].push(newNote);
+              }
+            }
+            oldItem["notes"].sort((a, b) => a["createDateTime"] - b["createDateTime"]);
+            result[NOTES_NAME][key] = oldItem;
+            ++counterNotesDuplicateItems;
+          }
+        }
+      }
+
+      if (!result[ANNOTATION_AUTHOR_NAME] && data[ANNOTATION_AUTHOR_NAME]) {
+        result[ANNOTATION_AUTHOR_NAME] = data[ANNOTATION_AUTHOR_NAME];
+      }
+      if (newArtifacts) {
+        result[ARTIFACTS_NAME] = result[ARTIFACTS_NAME] ?? {};
+        for (const rawKey in newArtifacts) {
+          const key = getKey(rawKey);
+          const incomingPage = newArtifacts[rawKey];
+          const existingPage = result[ARTIFACTS_NAME][key] ?? {
+            title: incomingPage.title,
+            url: incomingPage.url,
+            artifacts: []
+          };
+          const existingIds = new Set((existingPage.artifacts ?? []).map((artifact) => String(artifact.id)));
+          for (const artifact of incomingPage.artifacts ?? []) {
+            if (!existingIds.has(String(artifact.id))) {
+              existingPage.artifacts.push(artifact);
+              existingIds.add(String(artifact.id));
+              counterArtifactsMergeItems += 1;
+            }
+          }
+          existingPage.artifacts.sort((left, right) => left.createdAt - right.createdAt);
+          result[ARTIFACTS_NAME][key] = existingPage;
+        }
+      }
+
+      await _storage.set(result);
+        if(callback) {
+          callback({
+            "status": true,
+            "newStorage": result,
+            "counterAllRecordsDuplicateItems": counterAllRecordsDuplicateItems,
+            "counterAllRecordsMergeItems": counterAllRecordsMergeItems,
+            "counterReadLatersMergeItems": counterReadLatersMergeItems,
+            "counterNotesDuplicateItems": counterNotesDuplicateItems,
+            "counterNotesMergeItems": counterNotesMergeItems,
+            "counterAnnotationsMergeItems": counterAnnotationsMergeItems,
+            "counterArtifactsMergeItems": counterArtifactsMergeItems,
+            "takeMilliseconds": (new Date() - startDateTime)
+          });
+        }
+  } catch(e) { globalThis.EasyReadDiagnostics?.record(e, { source: "src/scripts/easyReadTools.js" }, false);
+    if(callback) {
+      callback({
+        "status": false,
+        "error": e
+      });
+    }
+  }
+}
+
+export async function replaceStorageJsonData(data, callback) {
+  if (!data) {
+    console.log("replaceStorageJsonData: data is null.");
+    if(callback) {
+      callback({ "status": false });
+    }
+    return;
+  }
+  try {
+    validateStorageImport(data);
+    data = normalizeNotesImport(data);
+    var startDateTime = new Date();
+    const result = await _storage.get(null);
+    await _storage.set(data);
+        if(callback) {
+          callback({
+            "status": true,
+            "oldStorage": result,
+            "newStorage": data,
+            "takeMilliseconds": (new Date() - startDateTime)
+          });
+        }
+  } catch(e) { globalThis.EasyReadDiagnostics?.record(e, { source: "src/scripts/easyReadTools.js" }, false);
+    if(callback) {
+      callback({
+        "status": false,
+        "error": e
+      });
+    }
+  }
+}
+
+export function clearAllStorage(callback) {
+  _storage.clear(() => {
+    if (callback) { callback() }
+  });
+}
+
+export async function updateBudgeText() {
+  const key = READ_LATERS_NAME;
+  let unreadCount = 0;
+  let badgeText = "";
+  _storage.get(key, (queryValue) => {
+    const list = queryValue[key];
+    if (list) {
+      for (let i = 0; i < list.length; ++i) {
+        if (!list[i].status || list[i].status === READ_STATUS_UNREAD) {
+          ++unreadCount;
+        }
+      }
+    }
+    if (unreadCount && unreadCount > 0) {
+      badgeText = unreadCount.toString();
+    }
+    chrome.action.setBadgeText({
+      text: badgeText
+    });
+    chrome.action.setBadgeTextColor({
+      color: "#6c5004"
+    });
+    chrome.action.setBadgeBackgroundColor({
+      color: "#ffe803"
+    });
+  });
+}
+
+/** ------- Markdown ------- **/
+
+/**
+ * Convert notes to markdown files
+ * @param {Array} data ["pageKey1": {...noteInfo...}, "pageKey2": {...noteInfo...}]
+ * @param {string} mdTemplate markdown template, with {notesSection} to replace notes section.
+ * @param {string} mdNotesSectionTemplate notes section template, with loop to page's notes.
+ * */
+export function convertNotesToMarkdownFiles(data, mdTemplate, mdNotesSectionTemplate) {
+  let files = [];
+  if(data) {
+    for(let key in data) {
+      if(data.hasOwnProperty(key)) {
+        const item = data[key];
+        const fileName = formatDateAsFileName(item["createDateTime"]) + "_" + convertToValidFileName(item["title"]) + ".md";
+
+        let markdown = "";
+        if(mdTemplate) {
+          markdown = mdTemplate;
+          markdown = markdownTemplaceReplace(markdown, "title", item["title"]);
+          markdown = markdownTemplaceReplace(markdown, "url", item["url"]);
+          markdown = markdownTemplaceReplace(markdown, "createDateTime", formatDate(item["createDateTime"]));
+        }
+        if(mdNotesSectionTemplate) {      
+          let notesSection = "";
+          if(item["notes"]) {          
+            for (const note of orderNotes(item.notes)) {
+              let notesSectionItem = mdNotesSectionTemplate;
+              notesSectionItem = markdownTemplaceReplace(notesSectionItem, "createDateTime", formatDate(note["createDateTime"]))
+              const original = decodeStoredText(note.selectionText).replace(/\r\n?/g, '\n');
+              const quote = original.trim() ? original.split('\n').map(line => `> ${line}`).join('\n') : '';
+              // Keep comments outside the quote, including older templates already using >.
+              notesSectionItem = notesSectionItem.replace(/(?:^[\t ]*>[\t ]*)?\$selectionText\$/gm, () => quote ? `\n\n${quote}\n\n` : '');
+              notesSectionItem = markdownTemplaceReplace(notesSectionItem, "author", note.author || "");
+              if (mdNotesSectionTemplate.includes('$comment$')) notesSectionItem = markdownTemplaceReplace(notesSectionItem, "comment", note.comment || "");
+              else if (note.comment) notesSectionItem += "\n\n" + note.comment + "\n";
+              notesSection += notesSectionItem;
+            }
+          }
+          markdown = markdown.replace("{notes_section}", () => notesSection);
+        }
+        files.push({"name": fileName, "content": markdown} );
+      }
+    }
+  }
+  return files;
+}
+
+function markdownTemplaceReplace(template, key, value) {
+  var regex = new RegExp("\\$" + key + "\\$", "g");
+  template = template.replace(regex, () => String(value ?? ''));
+  return template;
+}
+
+/**
+ * Get the scroll bar progress
+ * @returns {string} Scroll bar progress
+ */
+export function getScrollProgress() {
+  // Get page height
+  const pageHeight = document.documentElement.scrollHeight;
+  // Get visible area height
+  const windowHeight = window.innerHeight;
+  // Get scroll bar position
+  const scrollPosition = window.scrollY;
+  // Calculate scroll bar progress
+  const progress = pageHeight <= windowHeight ? 100 : Math.min(100, Math.max(0, (scrollPosition / (pageHeight - windowHeight)) * 100));
+  return progress;
+}
+
+/**
+* Set the scroll bar progress
+* @param {number} progress Scroll bar progress
+*/
+export function setScrollProgress(progress) {
+  const pageHeight = document.documentElement.scrollHeight;
+  const windowHeight = window.innerHeight;
+  const scrollPosition = (pageHeight - windowHeight) * (progress / 100);
+  window.scrollTo(0, scrollPosition);
+}
+
+export function getScrollPosition() {
+  let postion = {
+    scrollX: window.scrollX,
+    scrollY: window.scrollY,
+    progress: getScrollProgress()
+  }
+  return postion;
+}
+
+export function setScrollPostion(postion) {
+  window.scroll({
+    left: postion.scrollX,
+    top: postion.scrollY,
+    behavior: 'smooth'
+  });
+}
+
+// Define a module called Config
+const configs = (function () {
+  // Define a private variable to store configuration values
+  let _configs;
+
+  // Define a private method for loading configuration values from LocalStorage
+  function loadConfigFromLocalStorage() {
+    /*
+      const savedConfig = localStorage. getItem('configs');
+      if (savedConfig) {
+        return JSON.parse(savedConfig);
+      } else {
+        return {};
+      }*/
+    return {};
+  }
+
+  // Define a private method for merging configuration objects
+  function mergeConfig(configObj) {
+    // Load configuration values from LocalStorage
+    const savedConfig = loadConfigFromLocalStorage();
+
+    // Merge configuration objects, where values stored in LocalStorage have higher priority
+    return Object.assign({}, configObj, savedConfig);
+  }
+
+  // Define a public method for initializing the configuration object
+  function init(configObj) {
+    // If the configuration object has been initialized, return directly
+    if (_configs) {
+      return;
+    }
+
+    // Merge configuration object
+    _configs = mergeConfig(configObj);
+  }
+
+  // Define a public method for getting configuration objects
+  function getConfigs() {
+    return _configs;
+  }
+
+  // return public method
+  return {
+    init,
+    getConfigs
+  };
+})();
+
+// Initialize the configuration object globally
+configs.init({
+  IsAutoRecordedEnabled: true
+});
+
+export { configs };

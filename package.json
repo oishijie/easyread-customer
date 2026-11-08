@@ -1,0 +1,37 @@
+{
+  "name": "easyread",
+  "description": "EasyRead: Better browser experence: ReadLater, AutoRecord, AddNote, Save Markdown.",
+  "version": "2.4.2",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "build:unpacked": "npm run build",
+    "check": "node scripts/verify-baseline.mjs",
+    "lint": "eslint src scripts test",
+    "test:unit": "node --test",
+    "test:browser": "node scripts/verify-ui-browser.mjs",
+    "test:upgrade": "node scripts/verify-upgrade-browser.mjs",
+    "test:popup-layout": "node scripts/verify-popup-layout.mjs",
+    "test": "npm run check && npm run lint && npm run test:unit"
+  },
+  "keywords": [
+    "chrome-extensions",
+    "crx"
+  ],
+  "author": "volnet <eeee6688@hotmail.com>",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "hls.js": "1.6.13",
+    "jszip": "^3.10.1",
+    "mp4box": "2.4.1",
+    "mux.js": "6.3.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.2",
+    "eslint": "^10.8.1"
+  },
+  "private": true,
+  "homepage": "https://github.com/volnet/chrome-extensions-easyread"
+}

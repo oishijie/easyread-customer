@@ -460,7 +460,8 @@
     "message": "Remove",
     "description": "Remove button title in the saved links list."
   },
-  "popup_btn_read_later_text": {    "message": "Read Later",
+  "popup_btn_read_later_text": {
+    "message": "Read Later",
     "description": "The read later button text."
   },
   "popup_page_notes_title": {
@@ -1113,22 +1114,54 @@
   "notes_add": {
     "message": "Annotate (Selection)"
   },
-  "media_autoplay": { "message": "Autoplay" },
-  "media_filter_all": { "message": "All" },
-  "media_filter_empty": { "message": "No media in this category" },
-  "media_filter_video": { "message": "Video" },
-  "media_filter_audio": { "message": "Audio" },
-  "media_filter_image": { "message": "Images" },
-  "read_later_unread": { "message": "Unread" },
-  "read_later_completed": { "message": "Read" },
-  "read_later_completed_empty": { "message": "No read items yet" },
-  "media_autoplay_off": { "message": "Off (Default)" },
-  "media_autoplay_sequential": { "message": "Play in Order" },
-  "media_autoplay_simultaneous": { "message": "Play Together (Muted)" },
-  "media_muted": { "message": "Mute" },
-  "notes_page_expand": { "message": "Expand Page Notes" },
-  "notes_page_collapse": { "message": "Collapse Page Notes" },
-  "notes_countdown_seconds": { "message": "$1s" },
+  "media_autoplay": {
+    "message": "Autoplay"
+  },
+  "media_filter_all": {
+    "message": "All"
+  },
+  "media_filter_empty": {
+    "message": "No media in this category"
+  },
+  "media_filter_video": {
+    "message": "Video"
+  },
+  "media_filter_audio": {
+    "message": "Audio"
+  },
+  "media_filter_image": {
+    "message": "Images"
+  },
+  "read_later_unread": {
+    "message": "Unread"
+  },
+  "read_later_completed": {
+    "message": "Read"
+  },
+  "read_later_completed_empty": {
+    "message": "No read items yet"
+  },
+  "media_autoplay_off": {
+    "message": "Off (Default)"
+  },
+  "media_autoplay_sequential": {
+    "message": "Play in Order"
+  },
+  "media_autoplay_simultaneous": {
+    "message": "Play Together (Muted)"
+  },
+  "media_muted": {
+    "message": "Mute"
+  },
+  "notes_page_expand": {
+    "message": "Expand Page Notes"
+  },
+  "notes_page_collapse": {
+    "message": "Collapse Page Notes"
+  },
+  "notes_countdown_seconds": {
+    "message": "$1s"
+  },
   "notes_edit": {
     "message": "Edit Note"
   },
@@ -1149,5 +1182,11 @@
   },
   "notes_locate": {
     "message": "Go to Original Text"
+  },
+  "notice_action_failed": {
+    "message": "EasyRead: the operation didn't complete. Please try again."
+  },
+  "media_download_in_progress": {
+    "message": "Downloading…"
   }
 }

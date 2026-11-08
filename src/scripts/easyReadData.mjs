@@ -13,12 +13,28 @@ export const SYNC_ENABLED_NAME = "syncEnabled";
 export const SYNC_STATE_NAME = "syncState";
 export const SYNC_DIRTY_NAME = "syncDirty";
 export const FAVORITES_NAME = "favorites";
-// 本地删掉的收藏键：push 时要一起上报，否则服务端那条还在，下次拉取会把收藏「复活」
+// 本地删掉的数据键：push 时要一起上报，否则服务端那条还在，下次拉取会把数据「复活」
 export const FAVORITE_DELETIONS_NAME = "favoriteDeletions";
+export const READ_LATER_DELETIONS_NAME = "readLaterDeletions";
+export const NOTE_DELETIONS_NAME = "noteDeletions";
+export const RECORD_DELETIONS_NAME = "recordDeletions";
 
 export function addFavoriteDeletion(existing, key) {
+  return addPageDeletion(existing, key);
+}
+
+// 页面类删除队列：key 是规范化后的页面 URL
+export function addPageDeletion(existing, pageKey) {
   const list = Array.isArray(existing) ? existing : [];
-  const normalized = syncPageKey(key);
+  const normalized = syncPageKey(pageKey);
+  if (!normalized || list.includes(normalized)) return list;
+  return [...list, normalized];
+}
+
+// 笔记类删除队列：note.id 是 UUID 等非 URL 字符串，原样入队
+export function addIdDeletion(existing, id) {
+  const list = Array.isArray(existing) ? existing : [];
+  const normalized = String(id ?? '').trim();
   if (!normalized || list.includes(normalized)) return list;
   return [...list, normalized];
 }
@@ -371,7 +387,9 @@ function syncNumber(value) {
   return Number.isFinite(number) ? number : 0;
 }
 
-// Read Later 以页面 key 为身份；阅读状态单调递增，取两边较大的值。
+// Read Later 以页面 key 为身份。
+// 双方都带 updatedAt 时按条目 LWW——「标记未读」这类状态降级才能跨设备传播；
+// 任一方缺版本（升级前的旧数据）时退回旧规则：status 只增不减。
 export function mergeReadLaters(localItems, remoteItems, deletedKeys = []) {
   const merged = new Map();
   for (const item of Array.isArray(localItems) ? localItems : []) {
@@ -386,14 +404,7 @@ export function mergeReadLaters(localItems, remoteItems, deletedKeys = []) {
       merged.set(key, { ...item });
       continue;
     }
-    const next = { ...existing };
-    next.status = Math.max(syncNumber(existing.status), syncNumber(item.status));
-    if (!next.position && item.position) next.position = item.position;
-    if (!next.title && item.title) next.title = item.title;
-    if (!next.url && item.url) next.url = item.url;
-    if (!next.createDateTime && item.createDateTime) next.createDateTime = item.createDateTime;
-    if (next.status === READ_STATUS_READED && !next.endReadDateTime && item.endReadDateTime) next.endReadDateTime = item.endReadDateTime;
-    merged.set(key, next);
+    merged.set(key, mergeReadLaterItem(existing, item));
   }
   for (const key of Array.isArray(deletedKeys) ? deletedKeys : []) {
     merged.delete(syncPageKey(key));
@@ -401,7 +412,27 @@ export function mergeReadLaters(localItems, remoteItems, deletedKeys = []) {
   return [...merged.values()];
 }
 
-// 收藏按 key 去重合并，远端只补本地缺失的字段，不做字段级覆盖；墓碑里的直接删除。
+function mergeReadLaterItem(localItem, remoteItem) {
+  const localVersion = syncNumber(localItem.updatedAt);
+  const remoteVersion = syncNumber(remoteItem.updatedAt);
+  const lww = localVersion > 0 && remoteVersion > 0;
+  const winner = lww && remoteVersion > localVersion ? remoteItem : localItem;
+  const loser = winner === localItem ? remoteItem : localItem;
+  const next = { ...winner };
+  // 静态字段互补；position 不与状态耦合，缺的时候从对方补
+  if (!next.title && loser.title) next.title = loser.title;
+  if (!next.url && loser.url) next.url = loser.url;
+  if (!next.createDateTime && loser.createDateTime) next.createDateTime = loser.createDateTime;
+  if (!next.position && loser.position) next.position = loser.position;
+  if (!next.updatedAt && loser.updatedAt) next.updatedAt = loser.updatedAt;
+  if (!lww) {
+    next.status = Math.max(syncNumber(localItem.status), syncNumber(remoteItem.status));
+    if (next.status === READ_STATUS_READED && !next.endReadDateTime && loser.endReadDateTime) next.endReadDateTime = loser.endReadDateTime;
+  }
+  return next;
+}
+
+// 收藏按 key 去重合并：双方带版本时 LWW，否则远端只补本地缺失的条目；墓碑里的直接删除。
 export function mergeFavorites(localItems, remoteItems, deletedKeys = []) {
   const merged = new Map();
   for (const item of Array.isArray(localItems) ? localItems : []) {
@@ -410,8 +441,23 @@ export function mergeFavorites(localItems, remoteItems, deletedKeys = []) {
   }
   for (const item of Array.isArray(remoteItems) ? remoteItems : []) {
     const key = syncPageKey(item?.key || item?.url);
-    if (!key || merged.has(key)) continue;
-    merged.set(key, { ...item });
+    if (!key) continue;
+    const existing = merged.get(key);
+    if (!existing) {
+      merged.set(key, { ...item });
+      continue;
+    }
+    const localVersion = syncNumber(existing.updatedAt);
+    const remoteVersion = syncNumber(item.updatedAt);
+    if (!(localVersion > 0 && remoteVersion > 0)) continue; // 无版本可比时保留本地
+    const winner = remoteVersion > localVersion ? item : existing;
+    const loser = winner === existing ? item : existing;
+    const next = { ...winner };
+    if (!next.title && loser.title) next.title = loser.title;
+    if (!next.url && loser.url) next.url = loser.url;
+    if (!next.createDateTime && loser.createDateTime) next.createDateTime = loser.createDateTime;
+    if (!next.updatedAt && loser.updatedAt) next.updatedAt = loser.updatedAt;
+    merged.set(key, next);
   }
   for (const key of Array.isArray(deletedKeys) ? deletedKeys : []) {
     merged.delete(syncPageKey(key));
@@ -419,16 +465,17 @@ export function mergeFavorites(localItems, remoteItems, deletedKeys = []) {
   return [...merged.values()];
 }
 
-// 访问记录按页面累积，datetimes 取并集去重；其余字段本地优先。
-export function mergeAllRecords(localRecords, remoteRecords) {
+// 访问记录按页面累积：datetimes 永远取并集去重；title/url/position 按 updatedAt LWW；墓碑里的页面删除。
+export function mergeAllRecords(localRecords, remoteRecords, deletedKeys = []) {
+  const removedKeys = new Set((Array.isArray(deletedKeys) ? deletedKeys : []).map(syncPageKey).filter(Boolean));
   const merged = {};
   for (const [key, value] of Object.entries(localRecords && typeof localRecords === 'object' ? localRecords : {})) {
     const pageKey = syncPageKey(key);
-    if (pageKey && value && typeof value === 'object') merged[pageKey] = { ...value };
+    if (pageKey && value && typeof value === 'object' && !removedKeys.has(pageKey)) merged[pageKey] = { ...value };
   }
   for (const [key, value] of Object.entries(remoteRecords && typeof remoteRecords === 'object' ? remoteRecords : {})) {
     const pageKey = syncPageKey(key);
-    if (!pageKey || !value || typeof value !== 'object') continue;
+    if (!pageKey || removedKeys.has(pageKey) || !value || typeof value !== 'object') continue;
     const existing = merged[pageKey];
     if (!existing) {
       merged[pageKey] = { ...value };
@@ -438,16 +485,19 @@ export function mergeAllRecords(localRecords, remoteRecords) {
       ...(Array.isArray(existing.datetimes) ? existing.datetimes : []),
       ...(Array.isArray(value.datetimes) ? value.datetimes : [])
     ])].sort((left, right) => left - right);
-    const next = { ...existing, datetimes };
-    if (!next.title && value.title) next.title = value.title;
-    if (!next.url && value.url) next.url = value.url;
-    if (!next.position && value.position) next.position = value.position;
+    const localVersion = syncNumber(existing.updatedAt);
+    const remoteVersion = syncNumber(value.updatedAt);
+    const newer = remoteVersion > localVersion ? value : existing;
+    const older = newer === value ? existing : value;
+    const next = { ...newer, datetimes };
+    if (!next.title && older.title) next.title = older.title;
+    if (!next.url && older.url) next.url = older.url;
     merged[pageKey] = next;
   }
   return merged;
 }
 
-// 笔记按页面 + note.id 合并；云端只补充本地没有的笔记，删除以 deletedNoteIds 为准。
+// 笔记按页面 + note.id 合并：本地没有的补进来；远端带 updatedAt 且比本地新时整条覆盖（编辑传播）。
 export function mergeNotePages(localNotes, remoteNotes, deletedNoteIds = []) {
   const merged = {};
   for (const [key, page] of Object.entries(localNotes && typeof localNotes === 'object' ? localNotes : {})) {
@@ -462,12 +512,17 @@ export function mergeNotePages(localNotes, remoteNotes, deletedNoteIds = []) {
     if (!target.title && page.title) target.title = page.title;
     if (!target.url && page.url) target.url = page.url;
     if (!target.createDateTime && page.createDateTime) target.createDateTime = page.createDateTime;
-    const known = new Set(target.notes.map(note => String(note?.id)));
     for (const note of page.notes) {
       if (!note || note.id === undefined || note.id === null) continue;
-      if (known.has(String(note.id))) continue;
-      target.notes.push({ ...note });
-      known.add(String(note.id));
+      const noteId = String(note.id);
+      const index = target.notes.findIndex(item => String(item?.id) === noteId);
+      if (index < 0) {
+        target.notes.push({ ...note });
+        continue;
+      }
+      const remoteVersion = syncNumber(note.updatedAt);
+      const localVersion = syncNumber(target.notes[index].updatedAt);
+      if (remoteVersion > 0 && remoteVersion > localVersion) target.notes[index] = { ...note };
     }
     merged[pageKey] = target;
   }

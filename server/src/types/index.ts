@@ -30,7 +30,12 @@ export interface ReadLater {
     scrollX?: number;
     scrollY?: number;
   };
+  updated_at?: number; // 客户端每次改动打的时间戳，同步用它做 LWW
   synced_at: number;
+  // 扩展推送的载荷是 camelCase，与库内 snake_case 并存（写入入口两种都认）
+  updatedAt?: number;
+  startReadDateTime?: number;
+  endReadDateTime?: number;
 }
 
 export interface Favorite {
@@ -40,7 +45,9 @@ export interface Favorite {
   url: string;
   title: string;
   create_datetime: number;
+  updated_at?: number; // 客户端每次改动打的时间戳，同步用它做 LWW
   synced_at: number;
+  updatedAt?: number; // 扩展推送的 camelCase 别名
 }
 
 export interface AllRecord {  id: string;
@@ -53,6 +60,7 @@ export interface AllRecord {  id: string;
     scrollX?: number;
     scrollY?: number;
   };
+  updated_at?: number; // 最近一次访问/进度更新的时间，LWW 用
   synced_at: number;
 }
 

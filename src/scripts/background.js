@@ -4,7 +4,7 @@ import { ALL_RECORDS_NAME, FAVORITES_NAME, NOTES_NAME, READ_LATERS_NAME, SNAPSHO
 
 import { migrateNotes, notesOperation, withNotesLock } from './notesStore.mjs';
 import { sendPageMessage } from './pageConnection.mjs';
-import { cancelScheduledSync, getSyncConfig, isApplyingRemote, notifyLocalChange, normalizeEndpoint, pingEndpoint, signIn, signOut, syncNow } from './syncEngine.mjs';
+import { cancelScheduledSync, getSyncConfig, isApplyingRemote, isProgressWrite, markProgressWrite, notifyLocalChange, notifyProgressChange, normalizeEndpoint, pingEndpoint, signIn, signOut, syncNow } from './syncEngine.mjs';
 
 // Also cover unpacked reloads / worker restarts where installation events may not fire.
 // Queue before RPCs; only Notes stores are migrated, all other user data stays untouched.
@@ -43,12 +43,16 @@ chrome.storage.onChanged.addListener(async (changes, area) => {
     // 首次开启时把已有数据推上去
     if (syncEnabled) await notifyLocalChange();
   }
-  if (!(changes[READ_LATERS_NAME] || changes[ALL_RECORDS_NAME] || changes[NOTES_NAME] || changes[FAVORITES_NAME])) return;
+  const touched = [READ_LATERS_NAME, ALL_RECORDS_NAME, NOTES_NAME, FAVORITES_NAME].filter(name => changes[name]);
+  if (!touched.length) return;
   await syncEnabledReady;
   if (!syncEnabled) return;
   // 拉取回写本地时不算本地改动，否则会和云端互相触发。
   if (isApplyingRemote()) return;
-  await notifyLocalChange();
+  // 滚动位置/视频进度（写前打了 progress 标记的高频写入）只标脏、随 15 分钟周期同步；
+  // 若也走 5 秒防抖推送，连续浏览会把服务端写入配额打爆。
+  if (isProgressWrite()) { await notifyProgressChange(touched); return; }
+  await notifyLocalChange(touched);
 });
 
 chrome.runtime.onMessage.addListener((message, sender, reply) => {
@@ -314,10 +318,16 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message?.command === 'openAnnotationPopup') {
     if (!sender.tab?.id) return;
     (async () => {
-      await chrome.storage.session.set({ popupLastTab: { page: easyReadTools.getKey(sender.tab.url), tab: 'tabAnnotations' } });
-      await chrome.action.openPopup({ windowId: sender.tab.windowId });
-      respond({ ok: true });
-    })().catch(error => respond({ ok: false, error: error.message }));
+      try {
+        await chrome.storage.session.set({ popupLastTab: { page: easyReadTools.getKey(sender.tab.url), tab: 'tabAnnotations' } });
+        await chrome.action.openPopup({ windowId: sender.tab.windowId });
+        respond({ ok: true });
+      } catch (error) {
+        // openPopup 需要 Chrome 127+ 且依赖手势链；不可用时退回页内编辑器，操作始终有下文
+        await sendPageMessage(sender.tab.id, { command: 'openAnnotationComposer', selectionText: '' }).catch(() => {});
+        respond({ ok: false, error: error.message, fallback: 'composer' });
+      }
+    })();
     return true;
   }
   // diagnostics.js owns these replies. The generic tab acknowledgement must
@@ -682,6 +692,8 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     if (message && message.position) {
       // update readLaters's position.
       if (easyReadTools.isSupportedScheme(tab.url)) {
+        // 高频进度写入：标记后由 storage 监听归为 progress 类，只随周期同步
+        markProgressWrite();
         // console.log("easyReadTools.updateStorageJsonData(keyChainReadLaters")
         const keyChainReadLaters = easyReadTools.keyChainGenerate([easyReadTools.READ_LATERS_NAME]);
         easyReadTools.updateStorageJsonData(keyChainReadLaters, updateStorageCallback_ReadLatersPosition, {
@@ -701,6 +713,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
       }
     }
     if (message?.videoProgress && easyReadTools.isSupportedScheme(tab.url)) {
+      markProgressWrite();
       const keyChain = easyReadTools.keyChainGenerate([easyReadTools.ALL_RECORDS_NAME, pageKey]);
       easyReadTools.updateStorageJsonData(keyChain, updateStorageCallbackVideoProgress, {
         key: pageKey,
@@ -739,17 +752,12 @@ async function setTabScroll(tab) {
       await easyReadTools.getStorageJsonData(keyChainAllRecords, async (queryValue) => {
         let dataValue = queryValue[pageKey];
         if (dataValue && dataValue.position) {
-          let msg = {
-            "command": "setScroll",
-            "position": dataValue.position
-          };
           // console.log("Relocate the page at the position: ");
-          try {
-            chrome
-            await chrome.tabs.sendMessage(tab.id, msg);
-          } catch (e) { globalThis.EasyReadDiagnostics?.record(e, { source: "src/scripts/background.js" }, false);
-            console.log(e);
-          }
+          // 走 pageConnection（ping → 补注入 → 重试）：页面尚未注入或被休眠时，
+          // 裸 tabs.sendMessage 会报 "Receiving end does not exist" 且位置静默丢失。
+          await sendPageMessage(tab.id, { command: 'setScroll', position: dataValue.position }).catch(error => {
+            globalThis.EasyReadDiagnostics?.record(error, { operation: 'setScroll', page: { url: tab.url } }, false);
+          });
         }
       });
     }
@@ -819,7 +827,7 @@ chrome.contextMenus.onClicked.addListener(contextMenusOnClick);
 function contextMenusOnClick(info, tab) {
   switch (info.menuItemId) {
     case 'page':
-      addReadLater();
+      addReadLater(tab);
       break;
     case 'selection-add-highlight':
       addNotesSelection(info.selectionText, tab);
@@ -841,20 +849,18 @@ function contextMenusOnClick(info, tab) {
   }
 }
 
-async function addReadLater() {
-  const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (tabs && tabs.length > 0) {
-    const tab = tabs[0];
-    if (easyReadTools.isSupportedScheme(tab.url)) {
-      easyReadTools.updateStorageJsonData(
-        easyReadTools.keyChainGenerate([easyReadTools.READ_LATERS_NAME]),
-        easyReadTools.updateStorageCallbackReadLaterAdd,
-        {
-          tab: tab,
-          callbackOnUpdated: addReadLatersStorageUpdated,
-          onMessage: showMessages
-        });
-    };
+async function addReadLater(tab) {
+  // 用右键点击所在的 tab（onClicked 传入）：多窗口时 tabs.query({active, currentWindow})
+  // 拿到的是「当前窗口」的活动页，可能根本不是用户右键的那一页。
+  if (tab && easyReadTools.isSupportedScheme(tab.url)) {
+    easyReadTools.updateStorageJsonData(
+      easyReadTools.keyChainGenerate([easyReadTools.READ_LATERS_NAME]),
+      easyReadTools.updateStorageCallbackReadLaterAdd,
+      {
+        tab: tab,
+        callbackOnUpdated: addReadLatersStorageUpdated,
+        onMessage: showMessages
+      });
   }
 }
 
@@ -874,7 +880,11 @@ async function addNotesSelection(selectionText, tab) {
   try {
     const context = await sendPageMessage(tab.id, { command: 'getSelectionContext' }) || {};
     await withNotesLock(() => notesOperation({ action: 'add', url: tab.url, title: tab.title, selectionText, ...context }));
-  } catch (error) { globalThis.EasyReadDiagnostics?.record(error, { operation: 'highlight' }); }
+  } catch (error) {
+    globalThis.EasyReadDiagnostics?.record(error, { operation: 'highlight' });
+    // 右键菜单已经关闭，页面再不提示，用户会以为高亮加上了
+    await sendPageMessage(tab.id, { command: 'easyreadNotice', messageKey: 'notice_action_failed' }).catch(() => {});
+  }
 }
 async function openAnnotationComposer(selectionText, tab) {
   if (!tab?.id) return;
@@ -883,7 +893,10 @@ async function openAnnotationComposer(selectionText, tab) {
     const id = state?.pageKey === easyReadTools.getKey(tab.url) ? state.annotationId ?? state.noteId : null;
     const context = selectionText ? await sendPageMessage(tab.id, { command: 'getSelectionContext' }) || {} : {};
     await sendPageMessage(tab.id, { command: 'openAnnotationComposer', selectionText: selectionText || '', noteId: id, ...context });
-  } catch (error) { globalThis.EasyReadDiagnostics?.record(error, { operation: 'open-note' }); }
+  } catch (error) {
+    globalThis.EasyReadDiagnostics?.record(error, { operation: 'open-note' });
+    await sendPageMessage(tab.id, { command: 'easyreadNotice', messageKey: 'notice_action_failed' }).catch(() => {});
+  }
 }
 async function removeHighlightForTab(tab) {
   const context = tab ? highlightContextByTab.get(tab.id) : null;

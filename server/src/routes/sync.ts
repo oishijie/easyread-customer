@@ -1,7 +1,10 @@
 // Sync Routes (全量 / 增量同步)
 import { Hono } from 'hono';
 import type { Env } from '../types';
-import { upsertReadLater, upsertNote, upsertFavorite, deleteFavoriteByKey, syncAllRecords, getTombstones } from '../lib/db';
+import {
+  upsertReadLater, upsertNote, upsertFavorite, deleteFavoriteByKey, syncAllRecords, getTombstones,
+  deleteReadLaterByKey, deleteNoteByNoteId, deleteRecordByUrl, normalizePageUrl
+} from '../lib/db';
 import { errorResponse, jsonResponse } from '../lib/cors';
 
 const sync = new Hono<{ Bindings: Env; Variables: { userId: string } }>();
@@ -15,14 +18,28 @@ function positionOf(row: any) {
   return { progress, scrollX, scrollY };
 }
 
+function asStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string' && item.length > 0) : [];
+}
+
 // 全量同步（把本地数据推到云端，幂等：重复调用不会产生重复行）
 sync.post('/full', async (c) => {
   try {
     const userId = c.get('userId');
-    const { readLaters, allRecords, notes, favorites, favoriteDeletions } = await c.req.json();
+    const {
+      readLaters, allRecords, notes, favorites, favoriteDeletions,
+      readLaterDeletions, noteDeletions, recordDeletions
+    } = await c.req.json();
 
     const now = Date.now();
     let syncedCount = 0;
+
+    // 先落所有删除（写墓碑）、再写数据：同一条链接「删了又收」时，后者才是最终意图
+    // （墓碑比写入新时 upsert 会拒绝；写入成功会清掉过期墓碑）
+    for (const key of asStringArray(readLaterDeletions)) await deleteReadLaterByKey(c.env.DB, userId, key);
+    for (const noteId of asStringArray(noteDeletions)) await deleteNoteByNoteId(c.env.DB, userId, noteId);
+    for (const pageKey of asStringArray(recordDeletions)) await deleteRecordByUrl(c.env.DB, userId, pageKey);
+    for (const key of asStringArray(favoriteDeletions)) await deleteFavoriteByKey(c.env.DB, userId, key);
 
     if (Array.isArray(readLaters)) {
       for (const item of readLaters) {
@@ -44,14 +61,6 @@ sync.post('/full', async (c) => {
           await upsertNote(c.env.DB, userId, url, (page as any).title, note);
           syncedCount++;
         }
-      }
-    }
-
-    // 先落删除再写收藏：同一条链接「删了又收」时，后者才是最终意图（写入会清掉刚写的墓碑）
-    if (Array.isArray(favoriteDeletions)) {
-      for (const key of favoriteDeletions) {
-        if (typeof key !== 'string' || !key) continue;
-        await deleteFavoriteByKey(c.env.DB, userId, key);
       }
     }
 
@@ -103,24 +112,36 @@ sync.get('/pull', async (c) => {
 
     const deletedIds = await getTombstones(c.env.DB, userId, since);
 
+    // 拉取侧的墓碑兜底：更早版本写入的行可能带着非规范化 URL（大小写/#fragment），
+    // 与墓碑 key 不完全相等。按规范化后的 key 再过滤一遍，避免这些旧行把已删数据带回本地。
+    const recordTombstones = new Set(deletedIds.records);
+    const readLaterTombstones = new Set(deletedIds.readLaters);
+    const favoriteTombstones = new Set(deletedIds.favorites);
+    const noteTombstones = new Set(deletedIds.notes);
+
     // 输出字段名对齐 EasyRead 本地存储：allRecords 用 datetimes，readLaters 带 start/endReadDateTime
-    const readLaters = (readLatersResult.results || []).map(row => {
-      const item: Record<string, any> = {
-        key: row.key,
-        url: row.url,
-        title: row.title,
-        createDateTime: row.create_datetime,
-        status: row.status
-      };
-      if (row.start_read_datetime != null) item.startReadDateTime = row.start_read_datetime;
-      if (row.end_read_datetime != null) item.endReadDateTime = row.end_read_datetime;
-      const position = positionOf(row);
-      if (position) item.position = position;
-      return item;
-    });
+    const readLaters = (readLatersResult.results || [])
+      .filter(row => !readLaterTombstones.has(row.key as string))
+      .map(row => {
+        const item: Record<string, any> = {
+          key: row.key,
+          url: row.url,
+          title: row.title,
+          createDateTime: row.create_datetime,
+          status: row.status
+        };
+        if (row.start_read_datetime != null) item.startReadDateTime = row.start_read_datetime;
+        if (row.end_read_datetime != null) item.endReadDateTime = row.end_read_datetime;
+        const position = positionOf(row);
+        if (position) item.position = position;
+        if (row.updated_at != null) item.updatedAt = row.updated_at;
+        return item;
+      });
 
     const allRecords: Record<string, any> = {};
     for (const row of recordsResult.results || []) {
+      const pageKey = normalizePageUrl(row.url as string);
+      if (!pageKey || recordTombstones.has(pageKey)) continue;
       const item: Record<string, any> = {
         url: row.url,
         title: row.title,
@@ -128,11 +149,13 @@ sync.get('/pull', async (c) => {
       };
       const position = positionOf(row);
       if (position) item.position = position;
-      allRecords[row.url as string] = item;
+      if (row.updated_at != null) item.updatedAt = row.updated_at;
+      allRecords[pageKey] = item;
     }
 
     const notes: Record<string, any> = {};
     for (const row of notesResult.results || []) {
+      if (noteTombstones.has(row.note_id as string)) continue;
       const url = row.page_url as string;
       notes[url] ||= {
         url,
@@ -159,12 +182,18 @@ sync.get('/pull', async (c) => {
       readLaters,
       allRecords,
       notes,
-      favorites: (favoritesResult.results || []).map(row => ({
-        key: row.key,
-        url: row.url,
-        title: row.title,
-        createDateTime: row.create_datetime
-      })),
+      favorites: (favoritesResult.results || [])
+        .filter(row => !favoriteTombstones.has(row.key as string))
+        .map(row => {
+          const item: Record<string, any> = {
+            key: row.key,
+            url: row.url,
+            title: row.title,
+            createDateTime: row.create_datetime
+          };
+          if (row.updated_at != null) item.updatedAt = row.updated_at;
+          return item;
+        }),
       deletedIds,
       syncedAt: Date.now()
     });

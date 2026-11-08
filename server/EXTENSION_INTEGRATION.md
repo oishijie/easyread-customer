@@ -1,277 +1,40 @@
-# EasyRead Chrome 扩展同步功能集成指南
+# EasyRead 扩展 ↔ 同步后端 对接说明
 
-## 概述
+> 扩展侧已经内置完整的同步实现，**不需要**再按老版本本文档的示例代码写一个 SyncEngine——那套 class 示例已废弃。本文描述两侧实际的对接点。
 
-将 EasyRead 扩展与云端同步后端集成，实现多设备数据同步。
+## 扩展侧在哪里
 
-## 集成步骤
+| 关注点 | 位置 |
+|---|---|
+| 同步引擎（push/pull/防抖/脏标记） | 扩展仓库 `src/scripts/syncEngine.mjs` |
+| 合并规则（纯函数，有单测） | `src/scripts/easyReadData.mjs` 的 `mergeReadLaters` / `mergeAllRecords` / `mergeNotePages` / `mergeFavorites` |
+| 笔记读写与云端笔记合并 | `src/scripts/notesStore.mjs` |
+| 设置页 UI（endpoint/登录/立即同步） | `src/setting/setting.js` 的 Cloud sync 段 |
+| 快照上传（R2） | `src/scripts/background.js` 的 Snapshot upload 段 |
 
-### 1. 在扩展中添加配置
+同步行为的完整契约见扩展仓库的 `docs/SYNC-SEMANTICS.md`，两侧改动都要与它保持一致。
 
-在 `src/scripts/easyReadData.mjs` 中添加同步配置：
+## 对接协议速览
 
-```javascript
-// 同步配置
-export const SYNC_CONFIG_NAME = "syncConfig";
-export const SYNC_ENABLED_NAME = "syncEnabled";
+- `GET /health`：连通性探测（无需登录）。
+- `POST /api/auth/register` / `POST /api/auth/login`：返回 `{ token, user_id }`，扩展以 `Authorization: Bearer <token>` 携带。
+- `POST /api/sync/full`：全量/按脏集合推送。字段：`readLaters` / `allRecords` / `notes` / `favorites`（均可缺省）+ 四个删除队列 `favoriteDeletions` / `readLaterDeletions` / `noteDeletions` / `recordDeletions`。服务端先落删除（写墓碑）再 upsert；冲突按条目 `updatedAt` LWW，墓碑更新的写入会被拒绝。
+- `GET /api/sync/pull?since=<lastSyncAt>`：返回 `since` 后变更的行 + `deletedIds` 墓碑。字段名对齐扩展本地存储（camelCase，如 `selectionText` / `textPosition` / `endReadDateTime`）。
+- `POST /api/snapshots/upload`：multipart 上传，字段 `file` / `url` / `title` / `format`（`html`/`markdown`/`screenshot`；PDF 走浏览器打印对话框，不上传）。
 
-// 默认同步配置
-export const DEFAULT_SYNC_CONFIG = {
-  apiEndpoint: "", // 用户填写的 API 地址
-  token: "", // 登录后的 JWT token
-  userId: "", // 用户 ID
-  lastSyncTime: 0,
-  autoSync: true, // 是否自动同步
-  syncInterval: 15 * 60 * 1000 // 15 分钟
-};
+字段命名注意：扩展推送笔记是 **camelCase**（`selectionText`、`textPosition`、`updatedAt`、`createDateTime`），服务端 `upsertNote` 入口做了归一化，两种命名都接受；pull 输出始终是 camelCase。
+
+## 本地开发联调
+
+```bash
+# 后端（本目录）
+cp .dev.vars.example .dev.vars   # 设置 JWT_SECRET
+npx wrangler dev                 # 默认 http://127.0.0.1:8787
+
+# 扩展（仓库根目录）
+npm run build
+# Chrome → chrome://extensions → 加载已解压的扩展程序 → 选择 dist/（或 src/）
+# 设置页 → 云同步 → API 地址填 http://127.0.0.1:8787 → 注册/登录 → 立即同步
 ```
 
-### 2. 创建同步模块
-
-创建 `src/scripts/syncEngine.js`：
-
-```javascript
-import * as easyReadTools from './easyReadTools.js';
-import {
-  ALL_RECORDS_NAME,
-  READ_LATERS_NAME,
-  NOTES_NAME,
-  SYNC_CONFIG_NAME,
-  SYNC_ENABLED_NAME
-} from './easyReadData.mjs';
-
-class SyncEngine {
-  constructor() {
-    this.syncing = false;
-    this.config = null;
-  }
-
-  async init() {
-    const stored = await chrome.storage.local.get([SYNC_CONFIG_NAME, SYNC_ENABLED_NAME]);
-    this.config = stored[SYNC_CONFIG_NAME] || {};
-    this.enabled = stored[SYNC_ENABLED_NAME] || false;
-
-    if (this.enabled && this.config.autoSync) {
-      this.startAutoSync();
-    }
-  }
-
-  async updateConfig(config) {
-    this.config = { ...this.config, ...config };
-    await chrome.storage.local.set({ [SYNC_CONFIG_NAME]: this.config });
-  }
-
-  async login(email, password) {
-    try {
-      const response = await fetch(`${this.config.apiEndpoint}/api/auth/login`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email, password })
-      });
-
-      const data = await response.json();
-      
-      if (data.token) {
-        await this.updateConfig({
-          token: data.token,
-          userId: data.user_id
-        });
-        return { success: true };
-      }
-      
-      return { success: false, error: data.message };
-    } catch (error) {
-      return { success: false, error: error.message };
-    }
-  }
-
-  async syncToCloud() {
-    if (this.syncing || !this.config.token) return;
-
-    this.syncing = true;
-    
-    try {
-      // 获取本地数据
-      const localData = await chrome.storage.local.get([
-        READ_LATERS_NAME,
-        ALL_RECORDS_NAME,
-        NOTES_NAME
-      ]);
-
-      // 全量同步到云端
-      const response = await fetch(`${this.config.apiEndpoint}/api/sync/full`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${this.config.token}`
-        },
-        body: JSON.stringify({
-          readLaters: localData[READ_LATERS_NAME] || [],
-          allRecords: localData[ALL_RECORDS_NAME] || {},
-          notes: localData[NOTES_NAME] || {}
-        })
-      });
-
-      const result = await response.json();
-      
-      if (result.synced) {
-        await this.updateConfig({ lastSyncTime: Date.now() });
-        console.log('Sync to cloud success:', result);
-      }
-    } catch (error) {
-      console.error('Sync to cloud failed:', error);
-    } finally {
-      this.syncing = false;
-    }
-  }
-
-  async syncFromCloud() {
-    if (!this.config.token) return;
-
-    try {
-      const response = await fetch(
-        `${this.config.apiEndpoint}/api/sync/pull?since=${this.config.lastSyncTime || 0}`,
-        {
-          headers: {
-            'Authorization': `Bearer ${this.config.token}`
-          }
-        }
-      );
-
-      const data = await response.json();
-
-      // 合并云端数据到本地
-      if (data.readLaters || data.allRecords || data.notes) {
-        const localData = await chrome.storage.local.get([
-          READ_LATERS_NAME,
-          ALL_RECORDS_NAME,
-          NOTES_NAME
-        ]);
-
-        // 简单合并策略（云端优先）
-        const merged = {
-          [READ_LATERS_NAME]: [...(localData[READ_LATERS_NAME] || []), ...(data.readLaters || [])],
-          [ALL_RECORDS_NAME]: { ...(localData[ALL_RECORDS_NAME] || {}), ...(data.allRecords || {}) },
-          [NOTES_NAME]: { ...(localData[NOTES_NAME] || {}), ...(data.notes || {}) }
-        };
-
-        await chrome.storage.local.set(merged);
-        await this.updateConfig({ lastSyncTime: data.syncedAt });
-        
-        console.log('Sync from cloud success');
-      }
-    } catch (error) {
-      console.error('Sync from cloud failed:', error);
-    }
-  }
-
-  startAutoSync() {
-    setInterval(() => {
-      if (this.enabled && this.config.token) {
-        this.syncToCloud();
-      }
-    }, this.config.syncInterval || 15 * 60 * 1000);
-  }
-}
-
-export const syncEngine = new SyncEngine();
-```
-
-### 3. 在 background.js 中初始化同步
-
-在 `src/scripts/background.js` 中添加：
-
-```javascript
-import { syncEngine } from './syncEngine.js';
-
-// 初始化同步引擎
-chrome.runtime.onStartup.addListener(() => {
-  syncEngine.init().catch(console.error);
-});
-
-chrome.runtime.onInstalled.addListener(() => {
-  syncEngine.init().catch(console.error);
-});
-
-// 监听存储变化，触发同步
-chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && syncEngine.enabled) {
-    // 防抖：500ms 后同步
-    clearTimeout(syncEngine.syncTimer);
-    syncEngine.syncTimer = setTimeout(() => {
-      syncEngine.syncToCloud().catch(console.error);
-    }, 500);
-  }
-});
-```
-
-### 4. 在设置页面添加同步配置 UI
-
-在 `src/setting/setting.html` 中添加同步设置面板：
-
-```html
-<section id="syncPanel" class="settingsPanel" role="tabpanel" aria-labelledby="setting_tab_sync" hidden>
-  <h2>Cloud Sync Settings</h2>
-  
-  <div class="settingBlock">
-    <div class="settingToggleBlock">
-      <div>
-        <strong>Enable Cloud Sync</strong>
-        <p>Sync your data across devices</p>
-      </div>
-      <label class="modernSwitch">
-        <input type="checkbox" id="syncEnabled" />
-        <span aria-hidden="true"></span>
-      </label>
-    </div>
-  </div>
-
-  <div class="settingBlock" id="syncConfigBlock" hidden>
-    <label for="syncApiEndpoint">API Endpoint</label>
-    <input type="text" id="syncApiEndpoint" placeholder="https://your-worker.workers.dev" />
-    
-    <h3 style="margin-top: 20px;">Account</h3>
-    
-    <div id="syncLoginForm">
-      <label for="syncEmail">Email</label>
-      <input type="email" id="syncEmail" placeholder="your@email.com" />
-      
-      <label for="syncPassword">Password</label>
-      <input type="password" id="syncPassword" />
-      
-      <button type="button" id="btnSyncLogin" class="primaryButton">Login</button>
-      <button type="button" id="btnSyncRegister" class="secondaryButton">Register</button>
-    </div>
-
-    <div id="syncStatus" hidden>
-      <p>Logged in as: <span id="syncUserId"></span></p>
-      <p>Last synced: <span id="lastSyncTime">Never</span></p>
-      <button type="button" id="btnSyncNow" class="primaryButton">Sync Now</button>
-      <button type="button" id="btnSyncLogout" class="secondaryButton">Logout</button>
-    </div>
-  </div>
-</section>
-```
-
-在 `src/setting/setting.js` 中添加对应的处理逻辑。
-
-### 5. 测试同步功能
-
-1. 在扩展设置中启用同步
-2. 输入 Cloudflare Workers 的 API 地址
-3. 注册/登录账号
-4. 点击"立即同步"测试
-
-## 注意事项
-
-- 首次同步建议使用全量同步
-- 冲突解决策略：云端优先（可根据需求调整）
-- 敏感数据加密存储（建议后续实现）
-- 同步频率建议 15 分钟一次，避免频繁请求
-
-## 下一步
-
-- 实现增量同步优化
-- 添加冲突解决 UI
-- 支持手动选择同步项
-- 添加同步日志查看
+首次部署存量库需要执行一次 `npx wrangler d1 migrations apply easyread-sync`（引入 LWW 用的 `updated_at` 列），见 `DEPLOYMENT.md`。

@@ -1,4 +1,4 @@
-import { normalizePageUrl, decodeStoredText, mergeNotePages } from './easyReadData.mjs';
+import { NOTE_DELETIONS_NAME, normalizePageUrl, addIdDeletion, decodeStoredText, mergeNotePages } from './easyReadData.mjs';
 import { unifyNotes, isPageNote } from './notesModel.mjs';
 
 // Service-worker-owned serial queue: tabs and popup must not race read/modify/write.
@@ -25,7 +25,14 @@ export async function notesOperation(message) {
   const key = normalizePageUrl(message.url);
   if (message.action === 'all') return { notes: pages };
   if (message.action === 'clearAll') {
-    await chrome.storage.local.set({ notes: {}, annotations: {} });
+    // 记下所有笔记 id：push 时上报删除，否则服务端旧笔记会被其他设备拉回来
+    const removedIds = Object.values(pages).flatMap(page => (page?.notes || []).map(note => note?.id).filter(Boolean));
+    const stored = await chrome.storage.local.get(NOTE_DELETIONS_NAME);
+    let deletions = stored[NOTE_DELETIONS_NAME];
+    for (const id of removedIds) deletions = addIdDeletion(deletions, id);
+    const update = { notes: {}, annotations: {} };
+    if (removedIds.length) update[NOTE_DELETIONS_NAME] = deletions;
+    await chrome.storage.local.set(update);
     return { ok: true };
   }
   if (!/^https?:\/\//i.test(key)) throw new Error('Unsupported Notes page');
@@ -34,6 +41,8 @@ export async function notesOperation(message) {
   const index = page.notes.findIndex(note => String(note.id) === String(message.id));
   if (message.action === 'remove') {
     if (index < 0) return { removed: false };
+    const stored = await chrome.storage.local.get(NOTE_DELETIONS_NAME);
+    await chrome.storage.local.set({ [NOTE_DELETIONS_NAME]: addIdDeletion(stored[NOTE_DELETIONS_NAME], page.notes[index].id) });
     page.notes.splice(index, 1);
   } else if (message.action === 'edit') {
     if (index < 0) throw new Error('Note no longer exists');

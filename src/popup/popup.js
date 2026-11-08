@@ -1,6 +1,6 @@
 import "../scripts/diagnostics.js";
 import * as easyReadTools from "../scripts/easyReadTools.js";
-import { FAVORITE_DELETIONS_NAME, FAVORITES_NAME, SYNC_CONFIG_NAME, addFavoriteDeletion, createFavoriteUpdate, orderSaveKeys, removeFavoriteEntry } from '../scripts/easyReadData.mjs';
+import { FAVORITE_DELETIONS_NAME, FAVORITES_NAME, RECORD_DELETIONS_NAME, SYNC_CONFIG_NAME, SYNC_STATE_NAME, addFavoriteDeletion, addPageDeletion, createFavoriteUpdate, orderSaveKeys, removeFavoriteEntry } from '../scripts/easyReadData.mjs';
 import { initializeTabs } from '../scripts/ui.js';
 import { sendPageMessage } from '../scripts/pageConnection.mjs';
 import { initializePopupAnnotations, renderPopupAnnotations } from './popupAnnotations.mjs';
@@ -676,6 +676,8 @@ function renderMediaItems() {
       task.hidden = false;
       task.dataset.state = 'working';
       button.disabled = true;
+      // 会话级「下载中」标记：popup 中途被关掉后重开，按钮也不会被再次点下
+      await setMediaDownloadTask(item.url, { startedAt: Date.now(), title: item.fileName || item.title || "" });
       mediaDebugStages.set(index, []);
       mediaProgressStats.delete(index);
       addMediaDebugStage(index, "download-clicked", { media: item });
@@ -709,14 +711,24 @@ function renderMediaItems() {
           task.querySelector("small").textContent = easyReadTools.getMessageForLocales("capture_status_saved");
           button.disabled = false;
         }
+        await setMediaDownloadTask(item.url, null);
       } catch (error) {
         addMediaDebugStage(index, "download-failed", { error: { name: error.name, message: error.message, stack: error.stack || "", details: error.debug || null } });
         task.dataset.state = 'error';
         task.querySelector("small").textContent = error.message;
         globalThis.EasyReadDiagnostics?.record(error, { operation: "media-download", media: item, stages: mediaDebugStages.get(index) }, false);
         button.disabled = false;
+        await setMediaDownloadTask(item.url, null);
       }
     });
+    // 重开 popup 时恢复进行中下载的「下载中」状态
+    getMediaDownloadTasks().then(tasks => {
+      if (!isMediaDownloadActive(tasks[item.url])) return;
+      button.disabled = true;
+      task.hidden = false;
+      task.dataset.state = 'working';
+      task.querySelector("small").textContent = easyReadTools.getMessageForLocales("media_download_in_progress");
+    }).catch(() => {});
     const details = document.createElement("div");
     details.className = "mediaDetails";
     actions.append(sourceButton, button);
@@ -851,6 +863,32 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 });
 
+/* -------- Media download busy state (survives popup reopen) -------- */
+
+// 下载进行中标记放在 storage.session：popup 关了再开也能看到「下载中」并禁用按钮，
+// 否则同一个媒体会被并发下载两份。超时的旧条目视为已中断，自动恢复可点。
+const MEDIA_DOWNLOAD_SESSION_KEY = 'mediaDownloadTasks';
+const MEDIA_DOWNLOAD_STALE_MS = 10 * 60 * 1000;
+
+async function getMediaDownloadTasks() {
+  try {
+    const stored = await chrome.storage.session.get(MEDIA_DOWNLOAD_SESSION_KEY);
+    return stored[MEDIA_DOWNLOAD_SESSION_KEY] || {};
+  } catch { return {}; }
+}
+
+async function setMediaDownloadTask(mediaUrl, taskInfo) {
+  try {
+    const tasks = await getMediaDownloadTasks();
+    if (taskInfo) tasks[mediaUrl] = taskInfo; else delete tasks[mediaUrl];
+    await chrome.storage.session.set({ [MEDIA_DOWNLOAD_SESSION_KEY]: tasks });
+  } catch { /* session storage unavailable */ }
+}
+
+function isMediaDownloadActive(task) {
+  return Boolean(task) && Date.now() - (task.startedAt || 0) <= MEDIA_DOWNLOAD_STALE_MS;
+}
+
 /* -------- Top Menu bar -------- */
 
 function onPageLoad_InitTopMenuBar() {
@@ -972,21 +1010,25 @@ async function renderReadLaters(queryValue, context) {
         checkBox.id = ckId;
         checkBox.value = item["key"];
         checkBox.addEventListener('change', async (e) => {
-          if (e.target.checked) {
-            const key = e.target.value;
-            if (key) {
-              await easyReadTools.updateStorageJsonData(
-                easyReadTools.keyChainGenerate([easyReadTools.READ_LATERS_NAME]),
-                updateStorageCallback_ReadLaterRemove,
-                {
-                  key: easyReadTools.READ_LATERS_NAME,
-                  pageKey: key,
-                  checkBoxId: e.target.id
-                });
-              setTimeout(()=>{
-                easyReadTools.updateBudgeText();
-              }, 1000);
-            }
+          if (!e.target.checked) return; // 列表只展示未读，「标记已读」是唯一方向
+          const key = e.target.value;
+          if (!key) return;
+          try {
+            await easyReadTools.updateStorageJsonData(
+              easyReadTools.keyChainGenerate([easyReadTools.READ_LATERS_NAME]),
+              updateStorageCallback_ReadLaterRemove,
+              {
+                key: easyReadTools.READ_LATERS_NAME,
+                pageKey: key,
+                checkBoxId: e.target.id
+              });
+            setTimeout(()=>{
+              easyReadTools.updateBudgeText();
+            }, 1000);
+          } catch (error) {
+            // 写入失败要把勾选弹回去，否则复选框与存储状态不一致，看起来「删了但还在」
+            e.target.checked = false;
+            showMessages(`${easyReadTools.getMessageForLocales('ui_operation_failed')} ${error?.message || ''}`.trim());
           }
         });
 
@@ -1027,26 +1069,29 @@ function addReadLatersStorageUpdated(updateStatus, updateData) {
 }
 
 function removeReadLatersStorageUpdated(updateStatus, updateData, context) {
-  if (updateStatus) {
-    setTimeout(() => {
-      const liElement = document.getElementById(context.checkBoxId)?.parentElement;
-      if (liElement) {
-        const olElement = liElement.parentElement;
-        olElement.removeChild(liElement);
-        document.getElementById("titleReadLaters").textContent = easyReadTools.getMessageForLocales("popup_page_total_pages", [olElement.childNodes.length]);
-        document.getElementById('readLaterEmpty').hidden = olElement.childElementCount > 0;
-      }
-    }, 500);
+  if (!updateStatus) {
+    // 写入没生效（数据被云同步或其他上下文改过）：把勾选弹回去，别让复选框停在勾选态
+    if (context?.checkBoxId) {
+      const checkbox = document.getElementById(context.checkBoxId);
+      if (checkbox) checkbox.checked = false;
+    }
+    return;
   }
+  setTimeout(() => {
+    const liElement = document.getElementById(context.checkBoxId)?.parentElement;
+    if (liElement) {
+      const olElement = liElement.parentElement;
+      olElement.removeChild(liElement);
+      document.getElementById("titleReadLaters").textContent = easyReadTools.getMessageForLocales("popup_page_total_pages", [olElement.childNodes.length]);
+      document.getElementById('readLaterEmpty').hidden = olElement.childElementCount > 0;
+    }
+  }, 500);
 }
 
 function updateStorageCallback_ReadLaterRemove(queryValue, context) {
   var result = { status: easyReadTools.UPDATE_STATUS_NO, value: null, message: "", callback_onUpdated: removeReadLatersStorageUpdated };
   // queryValue == {} or {context.key: it's value}
-  // console.log(queryValue);
-  // console.log(context.key);
   const oldValue = queryValue[context.key];
-  // console.log(oldValue);
 
   if (!oldValue) {
     showMessages(easyReadTools.getMessageForLocales("popup_page_message_readlaters_remove_null"));
@@ -1062,6 +1107,8 @@ function updateStorageCallback_ReadLaterRemove(queryValue, context) {
       if (context.pageKey === oldValue[i].key && [easyReadTools.READ_STATUS_UNREAD, easyReadTools.READ_STATUS_READING].includes(oldValue[i].status)) {
         oldValue[i]["status"] = easyReadTools.READ_STATUS_READED;
         oldValue[i]["endReadDateTime"] = Date.now();
+        // 版本号：云同步按条目 LWW 合并靠它判定谁更新
+        oldValue[i]["updatedAt"] = Date.now();
         result.status = easyReadTools.UPDATE_STATUS_YES;
         result.value = oldValue;
         result.message = "Mark the page as READED.";
@@ -1074,9 +1121,10 @@ function updateStorageCallback_ReadLaterRemove(queryValue, context) {
       result.message = easyReadTools.getMessageForLocales("popup_page_message_readlaters_remove_null");
       showMessages(easyReadTools.getMessageForLocales("popup_page_message_readlaters_remove_null"));
     }
-
-    return result;
   }
+  // 必须始终返回 result：返回 undefined 会让 updateStorageJsonData 跳过 onUpdated 回调，
+  // 复选框会卡在勾选态、列表也不再刷新。
+  return result;
 }
 
 /* -------- Favorites (saved links) -------- */
@@ -1178,23 +1226,27 @@ function onPageLoad_InitFavorites() {
 
 /* -------- Cloud sync button -------- */
 
+// 模块级：storage.onChanged 也要刷新同步按钮，所以不能锁在 init 函数里
+async function refreshSyncButtonState() {
+  const button = document.getElementById('btnSyncNow');
+  if (!button) return;
+  // 未登录时按钮直接标出状态：点它是去设置页登录，避免被当成「同步坏了」
+  const stored = await chrome.storage.local.get(SYNC_CONFIG_NAME);
+  const config = stored[SYNC_CONFIG_NAME];
+  let text = easyReadTools.getMessageForLocales(config?.token ? 'popup_btn_sync_now' : 'popup_btn_sync_sign_in');
+  if (config?.token) {
+    const lastSync = config.lastSyncAt
+      ? new Date(config.lastSyncAt).toLocaleString()
+      : easyReadTools.getMessageForLocales('sync_status_never');
+    text = `${text} · ${easyReadTools.getMessageForLocales('popup_btn_sync_last', [lastSync])}`;
+  }
+  button.setAttribute('title', text);
+  button.setAttribute('aria-label', text);
+}
+
 function onPageLoad_InitSyncButton() {
   const button = document.getElementById('btnSyncNow');
 
-  // 未登录时按钮直接标出状态：点它是去设置页登录，避免被当成「同步坏了」
-  const refreshSyncButtonState = async () => {
-    const stored = await chrome.storage.local.get(SYNC_CONFIG_NAME);
-    const config = stored[SYNC_CONFIG_NAME];
-    let text = easyReadTools.getMessageForLocales(config?.token ? 'popup_btn_sync_now' : 'popup_btn_sync_sign_in');
-    if (config?.token) {
-      const lastSync = config.lastSyncAt
-        ? new Date(config.lastSyncAt).toLocaleString()
-        : easyReadTools.getMessageForLocales('sync_status_never');
-      text = `${text} · ${easyReadTools.getMessageForLocales('popup_btn_sync_last', [lastSync])}`;
-    }
-    button.setAttribute('title', text);
-    button.setAttribute('aria-label', text);
-  };
   refreshSyncButtonState();
 
   button.addEventListener('click', async () => {
@@ -1253,6 +1305,9 @@ function onPageLoad_InitReadLaters() {
     if (tabs && tabs.length > 0) {
       const tab = tabs[0];
       const pageUrl = easyReadTools.getKey(tab.url);
+      // 先记入删除队列再删本地：云同步要靠它删服务端的记录，否则会被其他设备拉回来
+      const queued = await chrome.storage.local.get(RECORD_DELETIONS_NAME);
+      await chrome.storage.local.set({ [RECORD_DELETIONS_NAME]: addPageDeletion(queued[RECORD_DELETIONS_NAME], pageUrl) });
       easyReadTools.removeStorageJsonData(easyReadTools.keyChainGenerate([easyReadTools.ALL_RECORDS_NAME, pageUrl]), () => {
         document.getElementById("pageRecordContent").textContent = easyReadTools.getMessageForLocales("popup_page_message_records_removed");
         btnReadedAndRemove.hidden = true;
@@ -1336,6 +1391,14 @@ async function onPageLoad_InitAllRecords() {
 
 // Keep the open popup current when the background records a visit after it loads.
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && changes[easyReadTools.ALL_RECORDS_NAME]) onPageLoad_InitAllRecords();
-  if (area === 'local' && changes[FAVORITES_NAME]) renderFavorites().catch(error => showMessages(error.message));
+  if (area !== 'local') return;
+  if (changes[easyReadTools.ALL_RECORDS_NAME]) onPageLoad_InitAllRecords();
+  if (changes[FAVORITES_NAME]) renderFavorites().catch(error => showMessages(error.message));
+  // 右键加的稍后阅读、云同步 pull 回写、后台定时同步改 lastSyncAt，都要能实时刷进 popup
+  if (changes[easyReadTools.READ_LATERS_NAME]) {
+    easyReadTools.getStorageJsonData(
+      easyReadTools.keyChainGenerate([easyReadTools.READ_LATERS_NAME]),
+      renderReadLaters, { key: easyReadTools.READ_LATERS_NAME });
+  }
+  if (changes[SYNC_CONFIG_NAME] || changes[SYNC_STATE_NAME]) refreshSyncButtonState();
 });

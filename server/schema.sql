@@ -1,5 +1,8 @@
 -- EasyRead Sync Backend - Cloudflare D1 Database Schema
--- 基于 EasyRead 的数据结构设计
+-- 基于 EasyRead 的数据结构设计。
+-- 本文件是「基线」schema：建表后还需执行 `npx wrangler d1 migrations apply easyread-sync`
+-- 追加后续迁移（如同步 LWW 用的 updated_at 列），不要把迁移过的列手工合并进来，
+-- 否则新库跑迁移会报 duplicate column。
 
 -- 用户表
 CREATE TABLE IF NOT EXISTS users (
@@ -133,8 +136,8 @@ CREATE TABLE IF NOT EXISTS sync_metadata (
 CREATE TABLE IF NOT EXISTS tombstones (
     id TEXT PRIMARY KEY,
     user_id TEXT NOT NULL,
-    entity TEXT NOT NULL,     -- 'read_later' | 'note' | 'favorite'
-    entity_key TEXT NOT NULL, -- read_later / favorite 的 key，或 note 的 note_id
+    entity TEXT NOT NULL,     -- 'read_later' | 'note' | 'favorite' | 'record'
+    entity_key TEXT NOT NULL, -- read_later / favorite 的 key、note 的 note_id、record 的页面 URL
     deleted_at INTEGER NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
     UNIQUE (user_id, entity, entity_key)

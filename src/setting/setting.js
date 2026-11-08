@@ -1,6 +1,6 @@
 import '../scripts/diagnostics.js';
 import * as easyReadTools from '../scripts/easyReadTools.js';
-import { SYNC_CONFIG_NAME, SYNC_ENABLED_NAME, SYNC_STATE_NAME } from '../scripts/easyReadData.mjs';
+import { READ_LATER_DELETIONS_NAME, RECORD_DELETIONS_NAME, SYNC_CONFIG_NAME, SYNC_ENABLED_NAME, SYNC_STATE_NAME, addPageDeletion } from '../scripts/easyReadData.mjs';
 import { initializeTabs } from '../scripts/ui.js';
 import { initializeRecords } from '../records/recordsView.js';
 await globalThis.EasyReadLocale?.ready;
@@ -41,6 +41,8 @@ function readLaterCheckbox(item) {
       target.status = checked ? easyReadTools.READ_STATUS_READED : easyReadTools.READ_STATUS_UNREAD;
       if (checked) target.endReadDateTime = Date.now();
       else delete target.endReadDateTime;
+      // 版本号：云同步按条目 LWW 合并，「标记未读」这种状态降级靠它传播
+      target.updatedAt = Date.now();
       return { status: easyReadTools.UPDATE_STATUS_YES, value: items };
     });
     await refreshSettingsReadLater();
@@ -267,7 +269,21 @@ for (const [id, key, success] of [
     const scope = key === easyReadTools.ALL_RECORDS_NAME ? message('setting_browsing_history') : key === easyReadTools.READ_LATERS_NAME ? message('popup_tab_read_later') : key === easyReadTools.NOTES_NAME ? message('setting_page_notice_notes') : null;
     if (!window.confirm(message('ui_confirm_remove', [scope ? message('setting_remove_scope', [scope]) : button.textContent]))) return;
     if (key === easyReadTools.NOTES_NAME) await notesCommand('clearAll');
-    else if (key) await chrome.storage.local.remove(key);
+    else if (key) {
+      // 清空也要走墓碑：否则服务端旧行还在，其他设备一推送就被「复活」
+      if (key === easyReadTools.READ_LATERS_NAME || key === easyReadTools.ALL_RECORDS_NAME) {
+        const stored = await chrome.storage.local.get(key);
+        const deletionName = key === easyReadTools.READ_LATERS_NAME ? READ_LATER_DELETIONS_NAME : RECORD_DELETIONS_NAME;
+        const keys = key === easyReadTools.READ_LATERS_NAME
+          ? (Array.isArray(stored[key]) ? stored[key] : []).map(item => item?.key || item?.url)
+          : Object.keys(stored[key] || {});
+        const queued = await chrome.storage.local.get(deletionName);
+        let deletions = queued[deletionName];
+        for (const itemKey of keys) deletions = addPageDeletion(deletions, itemKey);
+        await chrome.storage.local.set({ [deletionName]: deletions });
+      }
+      await chrome.storage.local.remove(key);
+    }
     else await chrome.storage.local.clear();
     await refreshPreferences();
     easyReadTools.updateBudgeText();

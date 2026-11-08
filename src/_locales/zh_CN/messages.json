@@ -1114,22 +1114,54 @@
   "notes_add": {
     "message": "批注（当前选中）"
   },
-  "media_autoplay": { "message": "自动播放" },
-  "media_filter_all": { "message": "全部" },
-  "media_filter_empty": { "message": "此分类暂无媒体" },
-  "media_filter_video": { "message": "视频" },
-  "media_filter_audio": { "message": "音频" },
-  "media_filter_image": { "message": "图片" },
-  "read_later_unread": { "message": "未读" },
-  "read_later_completed": { "message": "已读" },
-  "read_later_completed_empty": { "message": "暂无已读记录" },
-  "media_autoplay_off": { "message": "关闭（默认）" },
-  "media_autoplay_sequential": { "message": "按序播放" },
-  "media_autoplay_simultaneous": { "message": "同时播放（静音）" },
-  "media_muted": { "message": "静音" },
-  "notes_page_expand": { "message": "展开整页笔记" },
-  "notes_page_collapse": { "message": "折叠整页笔记" },
-  "notes_countdown_seconds": { "message": "$1秒" },
+  "media_autoplay": {
+    "message": "自动播放"
+  },
+  "media_filter_all": {
+    "message": "全部"
+  },
+  "media_filter_empty": {
+    "message": "此分类暂无媒体"
+  },
+  "media_filter_video": {
+    "message": "视频"
+  },
+  "media_filter_audio": {
+    "message": "音频"
+  },
+  "media_filter_image": {
+    "message": "图片"
+  },
+  "read_later_unread": {
+    "message": "未读"
+  },
+  "read_later_completed": {
+    "message": "已读"
+  },
+  "read_later_completed_empty": {
+    "message": "暂无已读记录"
+  },
+  "media_autoplay_off": {
+    "message": "关闭（默认）"
+  },
+  "media_autoplay_sequential": {
+    "message": "按序播放"
+  },
+  "media_autoplay_simultaneous": {
+    "message": "同时播放（静音）"
+  },
+  "media_muted": {
+    "message": "静音"
+  },
+  "notes_page_expand": {
+    "message": "展开整页笔记"
+  },
+  "notes_page_collapse": {
+    "message": "折叠整页笔记"
+  },
+  "notes_countdown_seconds": {
+    "message": "$1秒"
+  },
   "notes_edit": {
     "message": "编辑笔记"
   },
@@ -1150,5 +1182,11 @@
   },
   "notes_unlocated": {
     "message": "暂未定位到原文，内容已保留"
+  },
+  "notice_action_failed": {
+    "message": "EasyRead：操作未完成，请重试。"
+  },
+  "media_download_in_progress": {
+    "message": "下载中…"
   }
 }

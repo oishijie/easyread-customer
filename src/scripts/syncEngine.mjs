@@ -3,10 +3,14 @@ import {
   FAVORITE_DELETIONS_NAME,
   FAVORITES_NAME,
   NOTES_NAME,
+  READ_LATER_DELETIONS_NAME,
   READ_LATERS_NAME,
+  NOTE_DELETIONS_NAME,
+  RECORD_DELETIONS_NAME,
   SYNC_CONFIG_NAME,
   SYNC_DIRTY_NAME,
   SYNC_STATE_NAME,
+  latestRecordTime,
   mergeAllRecords,
   mergeFavorites,
   mergeReadLaters
@@ -18,10 +22,15 @@ const REQUEST_TIMEOUT_MS = 20000;
 const DEBOUNCE_MS = 5000;
 // 拉取会写本地存储，期间触发的 onChanged 不应再算作本地改动，否则会自激同步。
 const APPLY_SUPPRESS_MS = 2000;
+// 位置/视频进度这类高频写入打上 progress 标记：只随周期同步（15 分钟），
+// 不触发 5 秒防抖的全量推送，否则连续滚动会打爆服务端写入配额。
+const PROGRESS_WRITE_WINDOW_MS = 1500;
+const COLLECTIONS = [READ_LATERS_NAME, ALL_RECORDS_NAME, NOTES_NAME, FAVORITES_NAME];
 
 let debounceTimer = null;
 let running = null;
 let suppressUntil = 0;
+let progressWriteUntil = 0;
 
 export function normalizeEndpoint(value) {
   const trimmed = String(value ?? '').trim().replace(/\/+$/, '');
@@ -51,13 +60,35 @@ async function setSyncState(state) {
   await chrome.storage.local.set({ [SYNC_STATE_NAME]: { ...state, at: Date.now() } });
 }
 
-async function setDirty(value) {
-  await chrome.storage.local.set({ [SYNC_DIRTY_NAME]: value });
+// 背景脚本在写滚动位置/视频进度之前调用：之后的 onChanged 会被归为 progress 类改动。
+export function markProgressWrite() {
+  progressWriteUntil = Date.now() + PROGRESS_WRITE_WINDOW_MS;
 }
 
-async function isDirty() {
-  const stored = await chrome.storage.local.get(SYNC_DIRTY_NAME);
-  return stored[SYNC_DIRTY_NAME] === true;
+export function isProgressWrite() {
+  return Date.now() < progressWriteUntil;
+}
+
+async function getDirtyCollections() {
+  const stored = (await chrome.storage.local.get(SYNC_DIRTY_NAME))[SYNC_DIRTY_NAME];
+  if (stored === true) return Object.fromEntries(COLLECTIONS.map(name => [name, true]));
+  if (stored && typeof stored === 'object') return { ...Object.fromEntries(COLLECTIONS.map(name => [name, false])), ...stored };
+  return Object.fromEntries(COLLECTIONS.map(name => [name, false]));
+}
+
+async function markDirty(collections) {
+  const current = await getDirtyCollections();
+  const targets = Array.isArray(collections) && collections.length ? collections : COLLECTIONS;
+  for (const name of targets) if (current[name] !== undefined) current[name] = true;
+  await chrome.storage.local.set({ [SYNC_DIRTY_NAME]: current });
+}
+
+async function clearDirty(collections) {
+  const current = await getDirtyCollections();
+  for (const name of (Array.isArray(collections) && collections.length ? collections : COLLECTIONS)) {
+    if (current[name] !== undefined) current[name] = false;
+  }
+  await chrome.storage.local.set({ [SYNC_DIRTY_NAME]: current });
 }
 
 async function request(config, path, options = {}) {
@@ -119,31 +150,67 @@ export async function signIn({ apiEndpoint, email, password, register = false })
   if (!data?.token) throw Object.assign(new Error('Login returned no token'), { code: 'login_failed' });
   const next = await saveSyncConfig({ token: data.token, userId: data.user_id || '', email, lastSyncAt: 0 });
   // 新登录的账号需要把本地已有数据先推上去
-  await setDirty(true);
+  await markDirty();
   await setSyncState({ status: 'idle' });
   return next;
 }
 
 export async function signOut() {
   await saveSyncConfig({ token: '', userId: '', lastSyncAt: 0 });
-  await setDirty(false);
+  // 待上报的删除队列属于上一个账号，绝不能带进下一次登录，否则会误删新账号的云端数据
+  await chrome.storage.local.remove([FAVORITE_DELETIONS_NAME, READ_LATER_DELETIONS_NAME, NOTE_DELETIONS_NAME, RECORD_DELETIONS_NAME]);
+  await clearDirty();
   await setSyncState({ status: 'idle' });
 }
 
-async function push(config) {
-  const stored = await chrome.storage.local.get([READ_LATERS_NAME, ALL_RECORDS_NAME, NOTES_NAME, FAVORITES_NAME, FAVORITE_DELETIONS_NAME]);
-  const deletions = Array.isArray(stored[FAVORITE_DELETIONS_NAME]) ? stored[FAVORITE_DELETIONS_NAME] : [];
-  const body = {
-    readLaters: Array.isArray(stored[READ_LATERS_NAME]) ? stored[READ_LATERS_NAME] : [],
-    allRecords: stored[ALL_RECORDS_NAME] && typeof stored[ALL_RECORDS_NAME] === 'object' ? stored[ALL_RECORDS_NAME] : {},
-    notes: stored[NOTES_NAME] && typeof stored[NOTES_NAME] === 'object' ? stored[NOTES_NAME] : {},
-    favorites: Array.isArray(stored[FAVORITES_NAME]) ? stored[FAVORITES_NAME] : [],
-    favoriteDeletions: deletions
+// push 只上传 dirty 里为 true 的集合（force 时全量）；删除队列只要非空就始终带上。
+async function push(config, dirty) {
+  const stored = await chrome.storage.local.get([
+    READ_LATERS_NAME, ALL_RECORDS_NAME, NOTES_NAME, FAVORITES_NAME,
+    FAVORITE_DELETIONS_NAME, READ_LATER_DELETIONS_NAME, NOTE_DELETIONS_NAME, RECORD_DELETIONS_NAME
+  ]);
+  const want = name => !dirty || dirty[name] === true;
+  const deletions = (name, fallback = []) => {
+    const list = stored[name];
+    return Array.isArray(list) ? list : fallback;
   };
+  const readLaterDeletions = deletions(READ_LATER_DELETIONS_NAME);
+  const noteDeletions = deletions(NOTE_DELETIONS_NAME);
+  const recordDeletions = deletions(RECORD_DELETIONS_NAME);
+  const favoriteDeletions = deletions(FAVORITE_DELETIONS_NAME);
+
+  const body = { readLaterDeletions, noteDeletions, recordDeletions, favoriteDeletions };
+
+  if (want(READ_LATERS_NAME)) {
+    const items = Array.isArray(stored[READ_LATERS_NAME]) ? stored[READ_LATERS_NAME] : [];
+    // 旧数据没有 updatedAt：推送时用创建时间补一个版本号，让服务端 LWW 有据可依
+    body.readLaters = items.map(item => (item?.updatedAt ? item : { ...item, updatedAt: item?.createDateTime ?? 0 }));
+  }
+  if (want(ALL_RECORDS_NAME)) {
+    const records = stored[ALL_RECORDS_NAME] && typeof stored[ALL_RECORDS_NAME] === 'object' ? stored[ALL_RECORDS_NAME] : {};
+    body.allRecords = Object.fromEntries(Object.entries(records).map(([key, record]) => [
+      key,
+      record?.updatedAt ? record : { ...record, updatedAt: latestRecordTime(record) }
+    ]));
+  }
+  if (want(NOTES_NAME)) body.notes = stored[NOTES_NAME] && typeof stored[NOTES_NAME] === 'object' ? stored[NOTES_NAME] : {};
+  if (want(FAVORITES_NAME)) {
+    const items = Array.isArray(stored[FAVORITES_NAME]) ? stored[FAVORITES_NAME] : [];
+    body.favorites = items.map(item => (item?.updatedAt ? item : { ...item, updatedAt: item?.createDateTime ?? 0 }));
+  }
+
   const result = await request(config, '/api/sync/full', { method: 'POST', body: JSON.stringify(body) });
   // 服务端已把这些删除落成墓碑，本地待上报队列可以清了
-  if (deletions.length) await chrome.storage.local.set({ [FAVORITE_DELETIONS_NAME]: [] });
-  await setDirty(false);
+  const queues = [
+    [FAVORITE_DELETIONS_NAME, favoriteDeletions],
+    [READ_LATER_DELETIONS_NAME, readLaterDeletions],
+    [NOTE_DELETIONS_NAME, noteDeletions],
+    [RECORD_DELETIONS_NAME, recordDeletions]
+  ];
+  const clearUpdates = {};
+  for (const [name, queue] of queues) if (queue.length) clearUpdates[name] = [];
+  if (Object.keys(clearUpdates).length) await chrome.storage.local.set(clearUpdates);
+  await clearDirty(dirty ? Object.keys(dirty).filter(name => dirty[name] === true && COLLECTIONS.includes(name)) : COLLECTIONS);
   return result;
 }
 
@@ -154,6 +221,7 @@ async function applyPull(data) {
   const deletedKeys = Array.isArray(data?.deletedIds?.readLaters) ? data.deletedIds.readLaters : [];
   const deletedNoteIds = Array.isArray(data?.deletedIds?.notes) ? data.deletedIds.notes : [];
   const deletedFavoriteKeys = Array.isArray(data?.deletedIds?.favorites) ? data.deletedIds.favorites : [];
+  const deletedRecordKeys = Array.isArray(data?.deletedIds?.records) ? data.deletedIds.records : [];
 
   const updates = {};
 
@@ -162,7 +230,7 @@ async function applyPull(data) {
   if (JSON.stringify(nextReadLaters) !== JSON.stringify(localReadLaters)) updates[READ_LATERS_NAME] = nextReadLaters;
 
   const localRecords = stored[ALL_RECORDS_NAME] && typeof stored[ALL_RECORDS_NAME] === 'object' ? stored[ALL_RECORDS_NAME] : {};
-  const nextRecords = mergeAllRecords(localRecords, data?.allRecords || {});
+  const nextRecords = mergeAllRecords(localRecords, data?.allRecords || {}, deletedRecordKeys);
   if (JSON.stringify(nextRecords) !== JSON.stringify(localRecords)) updates[ALL_RECORDS_NAME] = nextRecords;
 
   const localFavorites = Array.isArray(stored[FAVORITES_NAME]) ? stored[FAVORITES_NAME] : [];
@@ -176,7 +244,7 @@ async function applyPull(data) {
   return { readLaters: nextReadLaters.length, records: Object.keys(nextRecords).length, favorites: nextFavorites.length };
 }
 
-// force=true 时无条件上传本地全量；否则只在本地有改动时上传，避免每轮同步都写库。
+// force=true 时无条件上传本地全量；否则只上传脏集合，避免每轮同步都写库。
 export function syncNow({ force = false } = {}) {
   if (running) return running;
   running = (async () => {
@@ -186,8 +254,10 @@ export function syncNow({ force = false } = {}) {
     await setSyncState({ status: 'running' });
     try {
       let pushed = false;
-      if (force || await isDirty()) {
-        await push(config);
+      const dirty = await getDirtyCollections();
+      const hasDirty = COLLECTIONS.some(name => dirty[name]);
+      if (force || hasDirty) {
+        await push(config, force ? null : dirty);
         pushed = true;
       }
       const data = await pull(config);
@@ -221,9 +291,15 @@ export function scheduleSync() {
   }, DEBOUNCE_MS);
 }
 
-export async function notifyLocalChange() {
-  await setDirty(true);
+export async function notifyLocalChange(collections) {
+  await markDirty(collections);
   scheduleSync();
+}
+
+// progress 类改动（滚动位置/视频进度）：只标脏、不触发防抖推送，等 15 分钟周期同步。
+// 服务端 LWW 需要版本号，progress 写入本身会把 updatedAt 一起刷新。
+export async function notifyProgressChange(collections) {
+  await markDirty(collections);
 }
 
 export function isApplyingRemote() {

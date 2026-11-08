@@ -46,9 +46,15 @@ database_id = "粘贴你的 database_id"
 
 ## 步骤 4：初始化数据库表
 
+新库和老库都执行同一组命令：`schema.sql` 是基线（`CREATE TABLE IF NOT EXISTS`，可重复执行），`migrations/` 里的迁移在其上追加新列（同步 LWW 用的 `updated_at` 等）。
+
 ```bash
-npx wrangler d1 execute easyread-sync --file=./schema.sql
+npx wrangler d1 execute easyread-sync --remote --file=./schema.sql
+npx wrangler d1 migrations apply easyread-sync --remote
+# 本地开发库把 --remote 换成 --local
 ```
+
+老库升级后，旧数据的 `updated_at` 为 NULL：服务端视为 0，任何带版本的新写入都会胜出，扩展会在推送时为旧条目补版本号，无需手工处理。
 
 ## 步骤 5：（可选）创建 R2 存储桶
 

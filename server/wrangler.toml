@@ -13,6 +13,7 @@ fallthrough = true
 binding = "DB"
 database_name = "easyread-sync"
 database_id = "06990939-0c9c-4b2d-936c-6f28e7757b6f" # 运行 `wrangler d1 create easyread-sync` 后填入
+migrations_dir = "migrations"
 
 # R2 存储桶（页面快照用）
 # 需要在 Cloudflare 后台单独开通。未开通时注释掉整段，快照接口会返回 501。

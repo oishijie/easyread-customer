@@ -13,6 +13,8 @@ const EASYREAD_CONTEXT_LENGTH = 32;
 const EASYREAD_VIDEO_REPORT_INTERVAL = 5000;
 
 let userHasScrolled = false;
+let userInteracted = false;
+let restoreScrollUntil = 0;
 let scrollTimer;
 let highlightTimer;
 let highlightObserver;
@@ -301,6 +303,27 @@ async function notesRequest(action, data = {}) {
 }
 async function getPageAnnotations() { return (await notesRequest('get')).notes; }
 
+// 页内轻提示：右键菜单操作失败时菜单已关闭，页面是唯一还能传达结果的地方。
+let noticeTimer;
+function showPageNotice(text) {
+    if (!document.body) return;
+    let notice = document.getElementById("easyread-page-notice");
+    if (!notice) {
+        notice = document.createElement("div");
+        notice.id = "easyread-page-notice";
+        notice.setAttribute("data-easyread-ui", "");
+        notice.style.cssText = "position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:2147483647;"
+            + "background:rgba(20,20,20,.88);color:#fff;padding:8px 14px;border-radius:8px;"
+            + "font:13px/1.4 system-ui,sans-serif;box-shadow:0 4px 12px rgba(0,0,0,.25);"
+            + "max-width:70vw;pointer-events:none;opacity:0;transition:opacity .2s;";
+        document.body.appendChild(notice);
+    }
+    notice.textContent = text;
+    notice.style.opacity = "1";
+    clearTimeout(noticeTimer);
+    noticeTimer = setTimeout(() => { notice.style.opacity = "0"; }, 3000);
+}
+
 async function getOrderedPageAnnotations() {
     const notes = await getPageAnnotations();
     const textIndex = document.body ? createTextIndex() : { text: '' };
@@ -315,8 +338,22 @@ async function getOrderedPageAnnotations() {
         if (a.scope !== 'page' && a.documentPosition !== b.documentPosition) return a.documentPosition - b.documentPosition;
         return (a.createDateTime || 0) - (b.createDateTime || 0) || a.storageIndex - b.storageIndex;
     });
-    if (Object.keys(positions).length) await notesRequest('positions', { positions });
+    if (Object.keys(positions).length) reportNotePositions(positions);
     return ordered;
+}
+
+// 位置回写要过 storage.onChanged → 云同步链路：动态页面每次渲染都可能算出新位置，
+// 不做「变化才发 + 防抖」会把整条链路刷成风暴。
+let lastSentNotePositions = null;
+let notePositionsTimer;
+function reportNotePositions(positions) {
+    const signature = JSON.stringify(positions);
+    if (signature === lastSentNotePositions) return;
+    lastSentNotePositions = signature;
+    clearTimeout(notePositionsTimer);
+    notePositionsTimer = setTimeout(() => {
+        notesRequest('positions', { positions: JSON.parse(signature) }).catch(console.log);
+    }, 2000);
 }
 
 function annotationDocumentPosition(annotation, textIndex) {
@@ -558,8 +595,12 @@ function ensureAnnotationSidebar() {
         if (editor) { editor.focus(); return; }
         try {
             const reply = await chrome.runtime.sendMessage({ command: 'openAnnotationPopup' });
-            if (reply?.ok) setAnnotationExpanded(sidebar, false);
-            else throw new Error(reply?.error || (globalThis.EasyReadLocale || chrome.i18n).getMessage('ui_operation_failed'));
+            if (reply?.ok) {
+                setAnnotationExpanded(sidebar, false);
+            } else if (reply?.fallback !== 'composer') {
+                // fallback=composer 表示后台已退回页内编辑器，这里不能再当失败处理
+                throw new Error(reply?.error || (globalThis.EasyReadLocale || chrome.i18n).getMessage('ui_operation_failed'));
+            }
         } catch (error) { globalThis.EasyReadDiagnostics?.record(error, { operation: 'open-annotation-popup' }); }
     });
     toolbar.append(downloadButton, popupButton, collapseButton);
@@ -1663,6 +1704,9 @@ function getScrollPosition() {
 }
 
 function setScrollPosition(position) {
+    // 平滑滚动会连发 scroll 事件：窗口期内不算用户滚动，
+    // 否则恢复动作会把自己标记成「用户滚动过」，还会把恢复中的位置写回存储。
+    restoreScrollUntil = Date.now() + 3000;
     window.scroll({
         left: position.scrollX,
         top: position.scrollY,
@@ -1674,9 +1718,21 @@ async function sendMessagePagePosition(position) {
     await sendRuntimeMessage({ position });
 }
 
+// 浏览器的滚动还原、锚点跳转也会触发 scroll 事件，但一定发生在任何用户交互之前。
+// 用「是否有过真实交互」把它们区分开：没有交互的滚动一律忽略、不上报。
+function markUserInteraction() {
+    userInteracted = true;
+    userHasScrolled = true;
+}
+for (const interactionType of ["pointerdown", "wheel", "touchstart", "keydown"]) {
+    window.addEventListener(interactionType, markUserInteraction, { passive: true, capture: true });
+}
+
 window.addEventListener("scroll", () => {
     if (!extensionContextAvailable()) { stopInvalidatedExtensionContext(); return; }
     if (captureScrollInProgress) return;
+    if (!userInteracted) return;
+    if (Date.now() < restoreScrollUntil) return;
     userHasScrolled = true;
     clearTimeout(scrollTimer);
     scrollTimer = setTimeout(async () => {
@@ -1692,6 +1748,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.command === 'easyreadPing') { sendResponse({ ok: true }); return; }
     if (message?.command === "setScroll" && !userHasScrolled) {
         setScrollPosition(message.position);
+    }
+    if (message?.command === "easyreadNotice") {
+        const text = message.messageKey
+            ? ((globalThis.EasyReadLocale || chrome.i18n).getMessage(message.messageKey) || message.messageKey)
+            : String(message.text || "");
+        if (text) showPageNotice(text);
+        sendResponse({ ok: true });
     }
     if (message?.command === "refreshHighlights") {
         refreshHighlights().catch(console.log);

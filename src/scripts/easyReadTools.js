@@ -212,7 +212,27 @@ export function keyChainGenerate(keys) {
 //          if update, status = UPDATE_STATUS_YES, the path exist_key0.not_exist_key1 will auto create.
 //          if not update, status = UPDATE_STATUS_NO
 // context: pass the params;
-export async function updateStorageJsonData(keyChain, callback, context) {
+
+// chrome.storage 没有事务，update/remove 都是 get→modify→set 三步：
+// popup / options / service worker 各自持有独立 JS 上下文，并发写同一集合时
+// 后写的会用「读到的旧快照」覆盖先写的改动（两个标签页同时上报进度时最明显）。
+// Web Locks 按源生效，扩展的各页面与 SW 同属 chrome-extension://<id> 源，可以互斥；
+// 不可用（旧内核）时退化为上下文内的 promise 队列，至少保住上下文内的串行。
+let storageContextQueue = Promise.resolve();
+function withStorageLock(task) {
+  if (globalThis.navigator?.locks?.request) {
+    return navigator.locks.request('easyread-storage-write', task);
+  }
+  const result = storageContextQueue.then(task);
+  storageContextQueue = result.catch(() => {});
+  return result;
+}
+
+export function updateStorageJsonData(keyChain, callback, context) {
+  return withStorageLock(() => updateStorageJsonDataExclusive(keyChain, callback, context));
+}
+
+async function updateStorageJsonDataExclusive(keyChain, callback, context) {
   const keyArray = keyChainSplit(keyChain);
   if (keyArray && keyArray.length > 0) {
     const key0 = keyArray[0];
@@ -272,16 +292,16 @@ export async function updateStorageJsonData(keyChain, callback, context) {
 
 // keyChain: like allRecords[KEYCHAIN_SEPARATOR][pageUrl]
 export function removeStorageJsonData(keyChain, callback) {
-  const keyArray = keyChainSplit(keyChain);
-  if (keyArray) {
-    const key0 = keyArray[0];
-    if (keyArray.length === 1) {
-      _storage.remove(key0, () => {
-        if (callback) { callback(); }
+  return withStorageLock(async () => {
+    const keyArray = keyChainSplit(keyChain);
+    if (keyArray) {
+      const key0 = keyArray[0];
+      if (keyArray.length === 1) {
+        await _storage.remove(key0);
         console.log("Removed: key:" + key0 + " removed from the storage.");
-      });
-    } else if (keyArray.length > 1) {
-      _storage.get([key0], (result) => {
+        if (callback) { callback(); }
+      } else {
+        const result = await _storage.get([key0]);
         var obj = result;
         function remove(keys) {
           var value = obj;
@@ -292,16 +312,15 @@ export function removeStorageJsonData(keyChain, callback) {
           delete value[keys[keys.length - 1]];
         }
         remove(keyArray);
-        _storage.set(obj, () => {
-          if (callback) { callback(); }
-          console.log("Removed: keyChain:" + keyChain);
-        });
-      });
+        await _storage.set(obj);
+        console.log("Removed: keyChain:" + keyChain);
+        if (callback) { callback(); }
+      }
+    } else {
+      if (callback) { callback(); }
+      console.log("Nothing to removed: keyChain:" + keyChain);
     }
-  } else {
-    if (callback) { callback(); }
-    console.log("Nothing to removed: keyChain:" + keyChain);
-  }
+  });
 }
 
 // keyChain: null=all; like allRecords[KEYCHAIN_SEPARATOR][pageUrl]

@@ -1,6 +1,31 @@
-# Chrome Extension EasyRead
+# EasyRead
 
 [**[English](README.md)** | [中文](docs/README-CN.md)]
+
+This repository contains the **EasyRead browser extension** (repo root) and its **optional self-hosted sync backend** ([`server/`](server/README.md), a Cloudflare Worker with D1 + R2). Cloud sync is off by default; all data stays local unless you enable it and point it at your own deployment.
+
+## Repository layout
+
+```
+.                       EasyRead extension (Chrome/Edge, MV3)
+├── src/                extension source (popup / content scripts / settings / background)
+├── test/               unit tests (node --test)
+├── scripts/            build & verification scripts
+├── docs/               docs (sync semantics, privacy, release notes…)
+└── server/             optional sync backend (Cloudflare Workers + D1 + R2)
+    ├── src/            Hono API (auth / sync / snapshots / dashboard)
+    ├── migrations/     D1 migrations (apply with `wrangler d1 migrations apply`)
+    ├── schema.sql      full schema for fresh installs
+    └── wrangler.toml   worker config
+```
+
+- Extension build & test: `npm install && npm run build && npm test` (see `package.json`).
+- Backend dev & deploy: see [`server/README.md`](server/README.md) and [`server/DEPLOYMENT.md`](server/DEPLOYMENT.md).
+- The sync contract between both sides is specified in [`docs/SYNC-SEMANTICS.md`](docs/SYNC-SEMANTICS.md).
+
+---
+
+## The extension
 
 This is a Chrome / Edge extension that creates a smooth web browsing experience for you, providing but not limited to: core functions such as reading later, adding notes, and auto-recording.
 

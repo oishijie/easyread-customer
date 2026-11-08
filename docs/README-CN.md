@@ -1,6 +1,31 @@
-# Chrome Extension EasyRead 轻松阅读
+# EasyRead 轻松阅读
 
 [[English](../README.md) | **[中文](README-CN.md)**]
+
+本仓库包含 **EasyRead 浏览器扩展**（仓库根目录）和可选的**自建云同步后端**（[`server/`](../server/README.md)，Cloudflare Workers + D1 + R2）。云同步默认关闭：不开启、不填写你自己的服务器地址时，所有数据只存在浏览器本地。
+
+## 仓库结构
+
+```
+.                       EasyRead 扩展（Chrome/Edge，MV3）
+├── src/                扩展源码（popup / content scripts / 设置页 / background）
+├── test/               单元测试（node --test）
+├── scripts/            构建与校验脚本
+├── docs/               文档（同步语义、隐私、发布说明…）
+└── server/             可选云同步后端（Cloudflare Workers + D1 + R2）
+    ├── src/            Hono API（认证 / 同步 / 快照 / 控制台）
+    ├── migrations/     D1 迁移（用 `wrangler d1 migrations apply` 应用）
+    ├── schema.sql      全量建表基线（新库）
+    └── wrangler.toml   Worker 配置
+```
+
+- 扩展构建与测试：`npm install && npm run build && npm test`（见 `package.json`）。
+- 后端开发与部署：见 [`server/README.md`](../server/README.md) 与 [`server/DEPLOYMENT.md`](../server/DEPLOYMENT.md)。
+- 两侧的同步行为契约见 [`docs/SYNC-SEMANTICS.md`](SYNC-SEMANTICS.md)。
+
+---
+
+## 扩展介绍
 
 这是一款Chrome/Edge扩展，为您打造流畅的网页浏览体验，包括但不限于：稍后阅读、添加笔记、自动记录等核心功能。
 
@@ -60,6 +85,22 @@
 3. 支持替换存储和合并存储两种恢复模式。
 4. 支持删除所有数据、部分数据以节省空间等目的。
 
+## 云同步
+
+把稍后阅读、访问记录、笔记、收藏备份到你自建的服务器，并在多台设备间同步。
+
+1. 从 [`server/`](../server/) 部署后端（Cloudflare Workers + D1 + R2），步骤见 [`server/DEPLOYMENT.md`](../server/DEPLOYMENT.md)。已有线上库需先执行迁移：`npx wrangler d1 migrations apply easyread-sync --remote`。
+2. 打开扩展设置页，进入**云同步**标签。
+3. 填入后端地址，注册账号，打开开关。
+
+同步语义（条目级 LWW、删除墓碑、合并规则、防自激）见 [`docs/SYNC-SEMANTICS.md`](SYNC-SEMANTICS.md)。
+
+数据不会发往其他任何地方：扩展只与你填写的地址通信。不开启云同步时数据始终留在浏览器本地。
+
+> 本仓库基于 [volnet/chrome-extensions-easyread](https://github.com/volnet/chrome-extensions-easyread)（Apache-2.0），
+> 在其上扩展了自建云同步后端、多设备同步正确性修复（条目级 LWW、删除墓碑、
+> 按配额调度的推送策略）以及一批交互修复，详见 [ROADMAP.md](../ROADMAP.md)。
+
 ## 如何安装
 
 ### 01 在线安装（推荐）
@@ -71,7 +112,7 @@
 
 [下载由浏览器插件市场提供签名的版本](https://github.com/volnet/chrome-extensions-easyread/releases)
 
-### 02 手动模式（源码模式，仅适用于开发者）
+### 03 手动模式（源码模式，仅适用于开发者）
 
 要安装扩展，请按照下列步骤操作：
 

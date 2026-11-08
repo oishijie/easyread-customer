@@ -87,16 +87,20 @@ We recommend you keep the EasyRead extension always displayed in the toolbar, yo
 
 ## Cloud Sync
 
-Back up Read Later, notes and browsing history to a server you control, and sync them across devices.
+Back up Read Later, browsing history, notes and favorites to a server you control, and sync them across devices.
 
-1. Deploy the backend — https://github.com/oishijie/easyread-sync (Cloudflare Workers + D1 + R2).
+1. Deploy the backend from [`server/`](server/) (Cloudflare Workers + D1 + R2) — see [`server/DEPLOYMENT.md`](server/DEPLOYMENT.md). For an existing deployment, apply D1 migrations first: `npx wrangler d1 migrations apply easyread-sync --remote`.
 2. Open the extension settings and go to the **Cloud Sync** tab.
 3. Enter the backend address, create an account, and turn the switch on.
 
+Sync semantics (per-item last-writer-wins, deletion tombstones, merge rules, self-excitation guard) are specified in [`docs/SYNC-SEMANTICS.md`](docs/SYNC-SEMANTICS.md).
+
 Nothing is sent anywhere else: the extension only talks to the address you enter. Cloud sync stays off until you enable it, and your data remains in the browser otherwise.
 
-> This copy adds cloud sync on top of upstream v2.0.0. Everything else is unchanged from
-> [volnet/chrome-extensions-easyread](https://github.com/volnet/chrome-extensions-easyread), Apache-2.0.
+> This copy is based on [volnet/chrome-extensions-easyread](https://github.com/volnet/chrome-extensions-easyread) (Apache-2.0)
+> and extends it with a self-hosted cloud sync backend, multi-device sync correctness work
+> (per-item LWW, deletion tombstones, quota-aware push scheduling) and interaction fixes.
+> See [ROADMAP.md](ROADMAP.md) for the changelog-level details.
 
 ## Installation
 
